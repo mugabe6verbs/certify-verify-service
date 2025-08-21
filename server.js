@@ -5,31 +5,36 @@ import admin from 'firebase-admin'
 
 const {
   PORT = 8080,
-  FLW_SECRET,               // Flutterwave secret key (test/live) - use any placeholder for now
+  FLW_SECRET,
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
-  FIREBASE_PRIVATE_KEY,     // paste with \n escaped
+  FIREBASE_PRIVATE_KEY,
   ALLOW_ORIGINS = 'http://localhost:5173'
 } = process.env
 
-if (!FLW_SECRET) console.warn('⚠ FLW_SECRET not set. The /verifyFlw endpoint will fail until you add it.')
+const hasFlwSecret = !!FLW_SECRET
+const privateKeyRaw = (FIREBASE_PRIVATE_KEY || '')
+const privateKey = privateKeyRaw.replace(/\\n/g, '\n')
+const hasFirebaseCreds = !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && privateKeyRaw)
 
-const privateKey = (FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
-if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !privateKey) {
-  console.warn('⚠ Firebase service account env vars not set. Writes to Firestore will fail until you add them.')
-}
+let db = null
 try {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: FIREBASE_PROJECT_ID,
-      clientEmail: FIREBASE_CLIENT_EMAIL,
-      privateKey
+  if (hasFirebaseCreds) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: FIREBASE_PROJECT_ID,
+        clientEmail: FIREBASE_CLIENT_EMAIL,
+        privateKey
+      })
     })
-  })
+    db = admin.firestore()
+    console.log('Firebase Admin initialized')
+  } else {
+    console.warn('⚠ Firebase credentials not set yet — Firestore writes disabled until you add them.')
+  }
 } catch (e) {
-  console.warn('Firebase admin init warning:', e?.message || e)
+  console.warn('⚠ Firebase Admin init warning:', e?.message || e)
 }
-const db = admin.firestore?.()
 
 const app = express()
 app.use(express.json())
@@ -42,14 +47,30 @@ app.use(cors({
   }
 }))
 
-app.get('/', (_,res)=> res.send('OK'))
+app.get('/', (_req, res) => {
+  res.type('html').send(`
+    <html><body style="font-family:system-ui;padding:16px">
+      <h2>Certify Verify Service</h2>
+      <ul>
+        <li>FLW_SECRET set: <strong style="color:${hasFlwSecret?'green':'crimson'}">${hasFlwSecret}</strong></li>
+        <li>Firebase creds set: <strong style="color:${hasFirebaseCreds?'green':'crimson'}">${hasFirebaseCreds}</strong></li>
+        <li>Allowed origins: ${allowList.map(o=>`<code>${o}</code>`).join(', ') || '—'}</li>
+      </ul>
+      <p>Health: <a href="/health">/health</a></p>
+      <p>Verify endpoint: <code>POST /verifyFlw</code></p>
+    </body></html>
+  `)
+})
 
-// POST /verifyFlw { id, uid, tx_ref }
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, hasFlwSecret, hasFirebaseCreds, allowList })
+})
+
 app.post('/verifyFlw', async (req, res) => {
   try{
     const { id, uid, tx_ref } = req.body || {}
     if (!id || !uid || !tx_ref) return res.status(400).json({ ok:false, error:'Missing id, uid or tx_ref' })
-    if (!FLW_SECRET) return res.status(500).json({ ok:false, error:'Server missing FLW_SECRET' })
+    if (!hasFlwSecret) return res.status(500).json({ ok:false, error:'Server missing FLW_SECRET' })
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
 
     const vr = await axios.get(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(id)}/verify`, {
@@ -61,8 +82,12 @@ app.post('/verifyFlw', async (req, res) => {
     const statusOk   = d.status === 'successful'
     const currencyOk = String(d.currency || '').toUpperCase() === 'USD'
     const txRefOk    = String(d.tx_ref || '') === String(tx_ref)
+
     if (!statusOk || !currencyOk || !txRefOk){
-      return res.status(400).json({ ok:false, reason:'verify_failed', got:{ status:d.status, currency:d.currency, tx_ref:d.tx_ref } })
+      return res.status(400).json({
+        ok:false, reason:'verify_failed',
+        got:{ status:d.status, currency:d.currency, tx_ref:d.tx_ref }
+      })
     }
 
     await db.collection('users').doc(String(uid)).set({
@@ -86,4 +111,4 @@ app.post('/verifyFlw', async (req, res) => {
   }
 })
 
-app.listen(PORT, ()=> console.log(`verify service listening on :${PORT}`))
+app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
