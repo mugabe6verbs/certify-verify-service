@@ -110,5 +110,42 @@ app.post('/verifyFlw', async (req, res) => {
     res.status(500).json({ ok:false, error: err })
   }
 })
+// POST /manualPro  — dev/test only (respects config/flags.allowManualPro)
+app.post('/manualPro', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+
+    // 1) Require an ID token from the signed-in client
+    const { idToken } = req.body || {}
+    if (!idToken) return res.status(400).json({ ok:false, error:'Missing idToken' })
+
+    // 2) Verify token → get caller's uid
+    const decoded = await admin.auth().verifyIdToken(String(idToken))
+    const uid = decoded.uid
+
+    // 3) Check your feature flag in Firestore
+    const flagsSnap = await db.collection('config').doc('flags').get()
+    const flags = flagsSnap.exists ? flagsSnap.data() : {}
+    if (!flags.allowManualPro) {
+      return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
+    }
+
+    // 4) Set Pro
+    await db.collection('users').doc(uid).set({
+      pro: true,
+      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastPayment: {
+        provider: 'manual',
+        note: 'Activated via /manualPro while allowManualPro=true'
+      }
+    }, { merge: true })
+
+    res.json({ ok:true, uid })
+  } catch (e) {
+    const err = e?.response?.data || e?.message || String(e)
+    res.status(500).json({ ok:false, error: err })
+  }
+})
 
 app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
+
