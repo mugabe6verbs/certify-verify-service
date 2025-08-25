@@ -146,6 +146,24 @@ app.post('/manualPro', async (req, res) => {
     res.status(500).json({ ok:false, error: err })
   }
 })
+// POST /makeEmailLink  -> returns a passwordless sign-in link for the given email
+app.post('/makeEmailLink', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+    const { email } = req.body || {}
+    if (!email) return res.status(400).json({ ok:false, error:'Missing email' })
+
+    const site = process.env.PUBLIC_SITE_URL || 'https://certificate-generator-345be.web.app'
+    const actionCodeSettings = { url: `${site}/finish-signin`, handleCodeInApp: true }
+
+    const link = await admin.auth().generateSignInWithEmailLink(String(email), actionCodeSettings)
+    return res.json({ ok:true, link })
+  } catch (e) {
+    const err = e?.message || String(e)
+    return res.status(500).json({ ok:false, error: err })
+  }
+})
 
 app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
+
 
