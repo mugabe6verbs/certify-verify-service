@@ -10,7 +10,9 @@ const {
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
   ALLOW_ORIGINS = 'http://localhost:5173',
-  PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app'
+  PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
+  // NEW: env override to allow manual pro without Firestore flag (for testing)
+  ALLOW_MANUAL_PRO
 } = process.env
 
 // --- Env checks
@@ -18,6 +20,8 @@ const hasFlwSecret = !!FLW_SECRET
 const privateKeyRaw = FIREBASE_PRIVATE_KEY || ''
 const privateKey = privateKeyRaw.replace(/\\n/g, '\n')
 const hasFirebaseCreds = !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && privateKeyRaw)
+const allowList = ALLOW_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
 // --- Firebase Admin
 let db = null
@@ -42,11 +46,9 @@ try {
 const app = express()
 app.use(express.json())
 
-const allowList = ALLOW_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
-
 // --- Health BEFORE any CORS gate (always reachable)
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, hasFlwSecret, hasFirebaseCreds, allowList })
+  res.json({ ok: true, hasFlwSecret, hasFirebaseCreds, allowList, projectId: FIREBASE_PROJECT_ID || null })
 })
 
 // --- CORS (tolerant: allow no Origin; allow only allowList when Origin present)
@@ -64,18 +66,58 @@ app.use(cors(corsOptions))
 
 // --- Home
 app.get('/', (_req, res) => {
+  const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   res.type('html').send(`
     <html><body style="font-family:system-ui;padding:16px">
       <h2>Certify Verify Service</h2>
       <ul>
+        <li>Project: <code>${FIREBASE_PROJECT_ID || '—'}</code></li>
+        <li>Service account: <code>${maskedSA || '—'}</code></li>
         <li>FLW_SECRET set: <strong style="color:${hasFlwSecret?'green':'crimson'}">${hasFlwSecret}</strong></li>
         <li>Firebase creds set: <strong style="color:${hasFirebaseCreds?'green':'crimson'}">${hasFirebaseCreds}</strong></li>
         <li>Allowed origins: ${allowList.map(o=>`<code>${o}</code>`).join(', ') || '—'}</li>
+        <li>ALLOW_MANUAL_PRO (env): <code>${String(ALLOW_MANUAL_PRO_ENV)}</code></li>
       </ul>
       <p>Health: <a href="/health">/health</a></p>
       <p>Verify endpoint: <code>POST /verifyFlw</code></p>
+      <p>Debug flags: <a href="/debugFlags">/debugFlags</a></p>
     </body></html>
   `)
+})
+
+// --- Helper: is manual pro enabled? (env override OR Firestore flag)
+async function isManualProEnabled() {
+  if (ALLOW_MANUAL_PRO_ENV) return true
+  if (!db) return false
+  try {
+    const snap = await db.collection('config').doc('flags').get()
+    return !!(snap.exists && snap.get('allowManualPro') === true)
+  } catch {
+    return false
+  }
+}
+
+// --- Debug: see what the server reads
+app.get('/debugFlags', async (_req, res) => {
+  try {
+    let snap = null
+    let exists = false
+    let allowManualProField = null
+    if (db) {
+      snap = await db.collection('config').doc('flags').get()
+      exists = !!(snap && snap.exists)
+      allowManualProField = exists ? snap.get('allowManualPro') : null
+    }
+    res.json({
+      ok: true,
+      projectId: FIREBASE_PROJECT_ID || null,
+      envAllowManualPro: ALLOW_MANUAL_PRO_ENV,
+      flagsDocExists: exists,
+      allowManualProField
+    })
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.message || String(e) })
+  }
 })
 
 // --- Shared verify → activates Pro on success
@@ -145,7 +187,7 @@ app.get('/verifyFlw', async (req, res) => {
   }
 })
 
-// --- Manual Pro (dev/test only; requires Firestore flag allowManualPro=true)
+// --- Manual Pro (dev/test only; allows env override or Firestore flag)
 app.post('/manualPro', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
@@ -155,18 +197,19 @@ app.post('/manualPro', async (req, res) => {
     const decoded = await admin.auth().verifyIdToken(String(idToken))
     const uid = decoded.uid
 
-    const flagsSnap = await db.collection('config').doc('flags').get()
-    const flags = flagsSnap.exists ? flagsSnap.data() : {}
-    if (!flags.allowManualPro) {
-      return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
+    const enabled = await isManualProEnabled()
+    if (!enabled) {
+      return res.status(403).json({ ok:false, error:'Manual Pro disabled', project: FIREBASE_PROJECT_ID })
     }
 
     await db.collection('users').doc(uid).set({
       pro: true,
       proSetAt: admin.firestore.FieldValue.serverTimestamp(),
       lastPayment: {
-        provider: 'manual',
-        note: 'Activated via /manualPro while allowManualPro=true'
+        provider: ALLOW_MANUAL_PRO_ENV ? 'manual-env' : 'manual',
+        note: ALLOW_MANUAL_PRO_ENV
+          ? 'Activated via /manualPro with ALLOW_MANUAL_PRO=true'
+          : 'Activated via /manualPro while allowManualPro=true'
       }
     }, { merge: true })
 
