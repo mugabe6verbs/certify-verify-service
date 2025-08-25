@@ -11,8 +11,10 @@ const {
   FIREBASE_PRIVATE_KEY,
   ALLOW_ORIGINS = 'http://localhost:5173',
   PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
-  // NEW: env override to allow manual pro without Firestore flag (for testing)
-  ALLOW_MANUAL_PRO
+  // Testing toggle (env) to allow /manualPro without Firestore flag
+  ALLOW_MANUAL_PRO,
+  // Admin override token for /admin/setPro (testing/rescue)
+  ADMIN_TOKEN,
 } = process.env
 
 // --- Env checks
@@ -48,17 +50,23 @@ app.use(express.json())
 
 // --- Health BEFORE any CORS gate (always reachable)
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, hasFlwSecret, hasFirebaseCreds, allowList, projectId: FIREBASE_PROJECT_ID || null })
+  res.json({
+    ok: true,
+    hasFlwSecret,
+    hasFirebaseCreds,
+    allowList,
+    projectId: FIREBASE_PROJECT_ID || null
+  })
 })
 
-// --- CORS (tolerant: allow no Origin; allow only allowList when Origin present)
+// --- CORS (tolerant: allow no Origin; restrict when Origin present)
 const corsOptions = {
   origin(origin, cb) {
     if (!origin || allowList.includes(origin)) return cb(null, true)
     return cb(new Error('Not allowed by CORS'))
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Token', 'x-admin-token'],
   optionsSuccessStatus: 204
 }
 app.options('*', cors(corsOptions))
@@ -77,6 +85,7 @@ app.get('/', (_req, res) => {
         <li>Firebase creds set: <strong style="color:${hasFirebaseCreds?'green':'crimson'}">${hasFirebaseCreds}</strong></li>
         <li>Allowed origins: ${allowList.map(o=>`<code>${o}</code>`).join(', ') || '—'}</li>
         <li>ALLOW_MANUAL_PRO (env): <code>${String(ALLOW_MANUAL_PRO_ENV)}</code></li>
+        <li>ADMIN_TOKEN set: <code>${ADMIN_TOKEN ? 'true' : 'false'}</code></li>
       </ul>
       <p>Health: <a href="/health">/health</a></p>
       <p>Verify endpoint: <code>POST /verifyFlw</code></p>
@@ -220,20 +229,45 @@ app.post('/manualPro', async (req, res) => {
   }
 })
 
-// --- Generate email link (fallback when Firebase email quota is hit)
-app.post('/makeEmailLink', async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-    const { email } = req.body || {}
-    if (!email) return res.status(400).json({ ok:false, error:'Missing email' })
+// === Admin override (testing/rescue only) ================================
+// Require X-Admin-Token header to protect this route
+function requireAdmin(req, res) {
+  if (!ADMIN_TOKEN) {
+    res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' })
+    return false
+  }
+  const token = req.headers['x-admin-token']
+  if (!token || token !== ADMIN_TOKEN) {
+    res.status(403).json({ ok:false, error:'Forbidden (admin token)' })
+    return false
+  }
+  return true
+}
 
-    const actionCodeSettings = { url: `${PUBLIC_SITE_URL}/finish-signin`, handleCodeInApp: true }
-    const link = await admin.auth().generateSignInWithEmailLink(String(email), actionCodeSettings)
-    return res.json({ ok:true, link })
+// POST /admin/setPro  -> { uid: string, pro?: boolean, note?: string }
+app.post('/admin/setPro', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+
+    const { uid, pro = true, note = 'admin setPro' } = req.body || {}
+    if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
+
+    await db.collection('users').doc(String(uid)).set({
+      pro: !!pro,
+      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastPayment: {
+        provider: 'admin',
+        note
+      }
+    }, { merge: true })
+
+    res.json({ ok:true, uid: String(uid), pro: !!pro })
   } catch (e) {
-    const err = e?.message || String(e)
-    return res.status(500).json({ ok:false, error: err })
+    const err = e?.response?.data || e?.message || String(e)
+    res.status(500).json({ ok:false, error: err })
   }
 })
+// ========================================================================
 
 app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
