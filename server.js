@@ -1,11 +1,9 @@
 // server.js (ESM)
-// package.json must have: { "type": "module", "scripts": { "start": "node server.js" } }
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
 import cors from 'cors'
 
-/* ===== Env ===== */
 const {
   PORT = 8080,
 
@@ -28,11 +26,12 @@ const {
   // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
-  PESA_BASE = 'demo',
+  // demo | live | auto (auto = try both)
+  PESA_BASE = 'auto',
   PESA_IPN_ID
 } = process.env
 
-/* ===== Helpers ===== */
+/* ================= Helpers ================= */
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
 const mask  = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
 function serverOrigin(req) {
@@ -41,7 +40,7 @@ function serverOrigin(req) {
   return `${xfProto}://${host}`
 }
 
-/* ===== Firebase Admin ===== */
+/* ================= Firebase Admin ================= */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
 const hasFirebaseCreds = !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && privateKey)
 let db = null
@@ -64,30 +63,56 @@ try {
 }
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
-/* ===== Pesapal config (for early health) ===== */
+/* ================= Pesapal config ================= */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
-const PESA_MODE   = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
-const PESA_DEMO   = 'https://cybqa.pesapal.com/pesapalv3'
-const PESA_LIVE   = 'https://pay.pesapal.com/v3'
-const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
+const PESA_MODE   = (PESA_BASE || 'auto').toLowerCase() // 'demo' | 'live' | 'auto'
+const PESA_URLS   = {
+  demo: 'https://cybqa.pesapal.com/pesapalv3',
+  live: 'https://pay.pesapal.com/v3'
+}
 
-/* ===== App ===== */
+/* Auto-detect token base (demo/live) */
+function isInvalidKeyErr(e) {
+  const code = e?.response?.data?.error?.code || ''
+  return String(code).toLowerCase().includes('invalid_consumer_key_or_secret_provided')
+}
+
+async function tokenFor(base) {
+  const url = PESA_URLS[base]
+  const { data } = await axios.post(
+    `${url}/api/Auth/RequestToken`,
+    { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
+    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
+  )
+  if (!data?.token) throw new Error(`No token in response: ${JSON.stringify(data)}`)
+  return { token: data.token, base, url }
+}
+
+async function pesaToken(preferred = PESA_MODE) {
+  if (!PESA_KEY || !PESA_SECRET) throw new Error('Missing PESA_CONSUMER_KEY/SECRET')
+
+  const order = (preferred === 'auto')
+    ? ['demo','live']
+    : [preferred, preferred === 'demo' ? 'live' : 'demo']
+
+  let lastErr = null
+  for (const b of order) {
+    try {
+      return await tokenFor(b)
+    } catch (e) {
+      lastErr = e
+      if (isInvalidKeyErr(e)) continue; // try the other base
+      throw e
+    }
+  }
+  throw lastErr
+}
+
+/* ================= App / CORS ================= */
 const app = express()
 
-/* --- EARLY health endpoints (pre-body-parser & pre-CORS) --- */
-app.get('/pesapal/health', (_req, res) => {
-  res.json({
-    ok: true,
-    base: PESA_MODE,
-    url: PESA_URL,
-    keyPreview: mask(PESA_KEY),
-    secretPreview: mask(PESA_SECRET),
-    hasKeys: !!(PESA_KEY && PESA_SECRET),
-    hasIpn: !!PESA_IPN_ID
-  })
-})
-
+// Early health (no CORS/body parsing)
 app.get(['/health','/api/health'], (_req, res) => {
   res.json({
     ok: true,
@@ -96,51 +121,57 @@ app.get(['/health','/api/health'], (_req, res) => {
   })
 })
 
-/* --- EARLY IPN register (GET/POST; empty bodies allowed) --- */
-app.all('/pesapal/registerIPN', async (req, res) => {
+app.get('/pesapal/health', async (req, res) => {
   try {
-    if (!PESA_KEY || !PESA_SECRET) {
-      return res.status(500).json({ ok:false, error:'Missing PESA_CONSUMER_KEY/SECRET' })
+    const probe = String(req.query.probe || '') === '1'
+    let baseResolved = null
+    if (probe) {
+      const { base } = await pesaToken()
+      baseResolved = base
     }
-    const origin = serverOrigin(req)
-    const ipnUrl = req.query?.url || `${origin}/pesapal/ipn`
-
-    const tokenResp = await axios.post(
-      `${PESA_URL}/api/Auth/RequestToken`,
-      { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
-      { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
-    )
-    const token = tokenResp?.data?.token
-    if (!token) throw new Error(`No token in response: ${JSON.stringify(tokenResp?.data)}`)
-
-    const { data } = await axios.post(
-      `${PESA_URL}/api/URLSetup/RegisterIPN`,
-      { url: ipnUrl, ipn_notification_type: 'GET' },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
-    )
-    // { ipn_id, url, ipn_notification_type }
-    res.json({ ok: true, ...data })
+    res.json({
+      ok: true,
+      configuredBase: PESA_MODE,
+      baseResolved,
+      keysPresent: !!(PESA_KEY && PESA_SECRET),
+      keyPreview: mask(PESA_KEY),
+      secretPreview: mask(PESA_SECRET)
+    })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
 
-/* --- Parse JSON only for methods that carry a body --- */
+// Allow registering IPN via GET or POST (no body required)
+app.all('/pesapal/registerIPN', async (req, res) => {
+  try {
+    const { token, base, url } = await pesaToken()
+    const origin = serverOrigin(req)
+    const ipnUrl = req.query?.url || req.body?.url || `${origin}/pesapal/ipn`
+    const { data } = await axios.post(
+      `${url}/api/URLSetup/RegisterIPN`,
+      { url: ipnUrl, ipn_notification_type: 'GET' },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
+    )
+    res.json({ ok:true, baseUsed: base, ...data }) // includes ipn_id
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  }
+})
+
+// Parse JSON for body-carrying verbs only
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
     return express.json({ limit: '2mb' })(req, res, next)
   }
-  return next()
+  next()
 })
 
-/* ===== CORS ===== */
+// CORS
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
-  origin(origin, cb) {
-    if (!origin || allowList.includes(origin)) return cb(null, true)
-    return cb(new Error('Not allowed by CORS'))
-  },
+  origin(origin, cb) { if (!origin || allowList.includes(origin)) return cb(null, true); cb(new Error('Not allowed by CORS')) },
   methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
   allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
   optionsSuccessStatus: 204
@@ -148,12 +179,7 @@ const corsOptions = {
 app.options('*', cors(corsOptions))
 app.use(cors(corsOptions))
 
-/* --- JSON error handler (no HTML error pages) --- */
-app.use((err, _req, res, _next) => {
-  if (err) return res.status(400).json({ ok:false, error: err.message || 'Bad Request' })
-})
-
-/* ===== Home ===== */
+// Home
 app.get('/', (_req, res) => {
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   res.type('html').send(`
@@ -164,33 +190,30 @@ app.get('/', (_req, res) => {
         <li>Service account: <code>${maskedSA || '—'}</code></li>
         <li>Firebase creds set: <strong style="color:${hasFirebaseCreds?'green':'crimson'}">${hasFirebaseCreds}</strong></li>
         <li>Allowed origins: ${allowList.map(o=>`<code>${o}</code>`).join(', ') || '—'}</li>
-        <li>ALLOW_MANUAL_PRO: <code>${String(ALLOW_MANUAL_PRO_ENV)}</code></li>
+        <li>Pesapal configuredBase: <code>${PESA_MODE}</code></li>
       </ul>
       <p>Health: <a href="/health">/health</a></p>
-      <p>Pesapal health: <a href="/pesapal/health">/pesapal/health</a></p>
+      <p>Pesapal health: <a href="/pesapal/health?probe=1">/pesapal/health?probe=1</a></p>
       <p><strong>Register IPN:</strong> <a href="/pesapal/registerIPN">/pesapal/registerIPN</a></p>
     </body></html>
   `)
 })
 
-/* ===== Debug: list mounted routes (helps confirm what’s live) ===== */
+// Debug: list mounted routes
 app.get('/debug/routes', (_req, res) => {
   const routes = []
   app._router.stack.forEach((m) => {
-    if (m.route && m.route.path) {
-      routes.push({ methods: Object.keys(m.route.methods), path: m.route.path })
-    } else if (m.name === 'router' && m.handle?.stack) {
+    if (m.route && m.route.path) routes.push({ methods: Object.keys(m.route.methods), path: m.route.path })
+    else if (m.name === 'router' && m.handle?.stack) {
       m.handle.stack.forEach((h) => {
-        if (h.route && h.route.path) {
-          routes.push({ methods: Object.keys(h.route.methods), path: h.route.path })
-        }
+        if (h.route && h.route.path) routes.push({ methods: Object.keys(h.route.methods), path: h.route.path })
       })
     }
   })
   res.json({ ok:true, routes })
 })
 
-/* ===== Email link (passwordless) ===== */
+/* ================= Email link (passwordless) ================= */
 app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
@@ -204,7 +227,7 @@ app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (
   }
 })
 
-/* ===== Flutterwave verify (optional) ===== */
+/* ================= Flutterwave verify (optional) ================= */
 const hasFlwSecret = !!FLW_SECRET
 async function verifyFlwAndActivate({ id, uid, tx_ref }) {
   if (!id || !uid || !tx_ref) return { ok:false, status:400, error:'Missing id, uid or tx_ref' }
@@ -260,7 +283,7 @@ app.get(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => 
   }
 })
 
-/* ===== Manual Pro (dev/test) ===== */
+/* ================= Manual Pro (dev/test) ================= */
 async function isManualProEnabled() {
   if (ALLOW_MANUAL_PRO_ENV) return true
   if (!db) return false
@@ -288,7 +311,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
   }
 })
 
-/* ===== Admin rescue endpoint ===== */
+/* ================= Admin rescue ================= */
 function requireAdmin(req, res) {
   if (!ADMIN_TOKEN) { res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' }); return false }
   const token = req.headers['x-admin-token']
@@ -312,36 +335,19 @@ app.post('/admin/setPro', async (req, res) => {
   }
 })
 
-/* ===== Pesapal order & IPN ===== */
-async function pesaToken() {
-  if (!PESA_KEY || !PESA_SECRET) throw new Error('Missing PESA_CONSUMER_KEY/SECRET')
-  try {
-    const { data } = await axios.post(
-      `${PESA_URL}/api/Auth/RequestToken`,
-      { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
-      { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
-    )
-    if (!data?.token) throw new Error(`No token in response: ${JSON.stringify(data)}`)
-    return data.token
-  } catch (e) {
-    const status = e?.response?.status
-    const body   = e?.response?.data
-    const msg    = e?.message
-    throw new Error(`RequestToken failed${status ? ` [${status}]` : ''}: ${JSON.stringify(body) || msg}`)
-  }
+/* ================= Pesapal order & IPN ================= */
+async function pesaFetchStatus(orderTrackingId) {
+  const { token, url } = await pesaToken()
+  const { data } = await axios.get(
+    `${url}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+  )
+  return data
 }
-app.get('/pesapal/tokenTest', async (_req, res) => {
-  try {
-    const token = await pesaToken()
-    res.json({ ok:true, token: token ? 'RECEIVED' : 'EMPTY' })
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.message || String(e) })
-  }
-})
 
 app.post('/pesapal/createOrder', async (req, res) => {
   try {
-    const token = await pesaToken()
+    const { token, base, url } = await pesaToken()
     const { uid, amount = 15, currency = 'USD', email, first_name = '', last_name = '' } = req.body || {}
     if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
     if (!PESA_IPN_ID) return res.status(500).json({ ok:false, error:'Server missing PESA_IPN_ID (register IPN first)' })
@@ -363,24 +369,16 @@ app.post('/pesapal/createOrder', async (req, res) => {
     }
 
     const { data } = await axios.post(
-      `${PESA_URL}/api/Transactions/SubmitOrderRequest`,
+      `${url}/api/Transactions/SubmitOrderRequest`,
       body,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
-    res.json({ ok: true, ...data, merchant_reference: merchantRef })
+    res.json({ ok: true, baseUsed: base, ...data, merchant_reference: merchantRef })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
 
-async function pesaFetchStatus(orderTrackingId) {
-  const token = await pesaToken()
-  const { data } = await axios.get(
-    `${PESA_URL}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`,
-    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
-  )
-  return data
-}
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
@@ -423,5 +421,5 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
-/* ===== Start ===== */
+/* ================= Start ================= */
 app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
