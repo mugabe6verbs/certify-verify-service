@@ -1,3 +1,5 @@
+// server.js (ESM)
+// package.json should include: { "type": "module" }
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
@@ -6,48 +8,43 @@ import cors from 'cors'
 /* =========================
    Environment Variables
    =========================
-   Required (Firebase Admin):
+   Firebase Admin (required):
      FIREBASE_PROJECT_ID
      FIREBASE_CLIENT_EMAIL
-     FIREBASE_PRIVATE_KEY        
+     FIREBASE_PRIVATE_KEY        (with \n escaped)
 
    Hosting / CORS:
-     ALLOW_ORIGINS              
-     PUBLIC_SITE_URL            
+     ALLOW_ORIGINS               (comma-separated)
+     PUBLIC_SITE_URL             (your Firebase hosting URL; used in callbacks)
 
-   Optional (features):
-     ALLOW_MANUAL_PRO=true      
-     ADMIN_TOKEN                
+   Features (optional):
+     ALLOW_MANUAL_PRO=true
+     ADMIN_TOKEN                 (for /admin/setPro)
 
    Flutterwave (optional):
      FLW_SECRET
 
-   Pesapal (sandbox/live):
+   Pesapal (demo/live):
      PESA_CONSUMER_KEY
      PESA_CONSUMER_SECRET
      PESA_BASE=demo|live
-     PESA_IPN_ID                
+     PESA_IPN_ID                 (set after /pesapal/registerIPN)
 */
 const {
   PORT = 8080,
 
-  // Firebase Admin
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
 
-  // CORS + site
   ALLOW_ORIGINS = 'http://localhost:5173,https://certificate-generator-345be.web.app,https://certificate-generator-345be.firebaseapp.com',
   PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
 
-  // Feature flags
   ALLOW_MANUAL_PRO,
   ADMIN_TOKEN,
 
-  // Flutterwave (optional)
   FLW_SECRET,
 
-  // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',
@@ -94,11 +91,45 @@ try {
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
 /* =========================
-   Express / CORS
+   Pesapal config (defined early so health can run pre-CORS)
+========================= */
+const PESA_KEY    = clean(PESA_CONSUMER_KEY)
+const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
+const PESA_MODE   = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
+const PESA_DEMO   = 'https://cybqa.pesapal.com/pesapalv3'
+const PESA_LIVE   = 'https://pay.pesapal.com/v3'
+const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
+
+/* =========================
+   Express
 ========================= */
 const app = express()
 app.use(express.json({ limit: '2mb' }))
 
+/* ---------- EARLY health endpoints (pre-CORS) ---------- */
+app.get('/pesapal/health', (_req, res) => {
+  res.json({
+    ok: true,
+    base: PESA_MODE,
+    url: PESA_URL,
+    keyPreview: mask(PESA_KEY),
+    secretPreview: mask(PESA_SECRET),
+    hasKeys: !!(PESA_KEY && PESA_SECRET),
+    hasIpn: !!PESA_IPN_ID
+  })
+})
+app.get(['/health','/api/health'], (_req, res) => {
+  res.json({
+    ok: true,
+    projectId: FIREBASE_PROJECT_ID || null,
+    hasFirebaseCreds,
+    // allowList shown later after we build it
+  })
+})
+
+/* =========================
+   CORS (tolerant)
+========================= */
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
   origin(origin, cb) {
@@ -112,18 +143,14 @@ const corsOptions = {
 app.options('*', cors(corsOptions))
 app.use(cors(corsOptions))
 
-/* =========================
-   Health / Home
-========================= */
-app.get(['/health','/api/health'], (_req, res) => {
-  res.json({
-    ok: true,
-    projectId: FIREBASE_PROJECT_ID || null,
-    hasFirebaseCreds,
-    allowList
-  })
+/* ---------- JSON error handler so we never emit HTML errors ---------- */
+app.use((err, _req, res, _next) => {
+  if (err) return res.status(400).json({ ok:false, error: err.message || 'Bad Request' })
 })
 
+/* =========================
+   Home
+========================= */
 app.get('/', (_req, res) => {
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   res.type('html').send(`
@@ -265,7 +292,6 @@ function requireAdmin(req, res) {
   }
   return true
 }
-
 app.post('/admin/setPro', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
@@ -286,25 +312,6 @@ app.post('/admin/setPro', async (req, res) => {
 /* =========================
    Pesapal (demo/live)
 ========================= */
-const PESA_KEY    = clean(PESA_CONSUMER_KEY)
-const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
-const PESA_MODE   = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
-const PESA_DEMO   = 'https://cybqa.pesapal.com/pesapalv3'
-const PESA_LIVE   = 'https://pay.pesapal.com/v3'
-const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
-
-app.get('/pesapal/health', (_req, res) => {
-  res.json({
-    ok: true,
-    base: PESA_MODE,
-    url: PESA_URL,
-    keyPreview: mask(PESA_KEY),
-    secretPreview: mask(PESA_SECRET),
-    hasKeys: !!(PESA_KEY && PESA_SECRET),
-    hasIpn: !!PESA_IPN_ID
-  })
-})
-
 async function pesaToken() {
   if (!PESA_KEY || !PESA_SECRET) throw new Error('Missing PESA_CONSUMER_KEY/SECRET')
   try {
@@ -323,7 +330,7 @@ async function pesaToken() {
   }
 }
 
-// Optional probe
+// Optional probe (useful while configuring keys)
 app.get('/pesapal/tokenTest', async (_req, res) => {
   try {
     const token = await pesaToken()
@@ -333,7 +340,7 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
   }
 })
 
-// One-time: register IPN -> returns ipn_id (set env PESA_IPN_ID, redeploy)
+// Register IPN -> returns ipn_id (save to env PESA_IPN_ID then redeploy)
 app.post('/pesapal/registerIPN', async (req, res) => {
   try {
     const token = await pesaToken()
@@ -343,7 +350,7 @@ app.post('/pesapal/registerIPN', async (req, res) => {
       { url: ipnUrl, ipn_notification_type: 'GET' },
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
-    res.json({ ok: true, ...data }) // data.ipn_id
+    res.json({ ok: true, ...data }) // includes data.ipn_id
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
