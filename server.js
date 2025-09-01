@@ -1,5 +1,5 @@
 // server.js (ESM)
-// package.json should include: { "type": "module" }
+// Ensure package.json has: { "type": "module" }
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
@@ -7,27 +7,44 @@ import cors from 'cors'
 
 /* =========================
    Environment Variables
-========================= */
+   =========================
+   Firebase Admin (required):
+     FIREBASE_PROJECT_ID
+     FIREBASE_CLIENT_EMAIL
+     FIREBASE_PRIVATE_KEY        (with \n escaped)
+
+   Hosting / CORS:
+     ALLOW_ORIGINS               (comma-separated)
+     PUBLIC_SITE_URL             (your Firebase hosting URL; used in callbacks)
+
+   Features (optional):
+     ALLOW_MANUAL_PRO=true
+     ADMIN_TOKEN                 (for /admin/setPro)
+
+   Flutterwave (optional):
+     FLW_SECRET
+
+   Pesapal (demo/live):
+     PESA_CONSUMER_KEY
+     PESA_CONSUMER_SECRET
+     PESA_BASE=demo|live
+     PESA_IPN_ID                 (set after /pesapal/registerIPN)
+*/
 const {
   PORT = 8080,
 
-  // Firebase Admin
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
 
-  // CORS + site
   ALLOW_ORIGINS = 'http://localhost:5173,https://certificate-generator-345be.web.app,https://certificate-generator-345be.firebaseapp.com,https://certify-verify-service-2.onrender.com',
   PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
 
-  // Feature flags
   ALLOW_MANUAL_PRO,
   ADMIN_TOKEN,
 
-  // Flutterwave (optional)
   FLW_SECRET,
 
-  // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',
@@ -39,6 +56,7 @@ const {
 ========================= */
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
 const mask  = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
+
 function serverOrigin(req) {
   const xfProto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || 'https'
   const host = req.headers.host
@@ -99,6 +117,7 @@ app.get('/pesapal/health', (_req, res) => {
     hasIpn: !!PESA_IPN_ID
   })
 })
+
 app.get(['/health','/api/health'], (_req, res) => {
   res.json({
     ok: true,
@@ -107,7 +126,37 @@ app.get(['/health','/api/health'], (_req, res) => {
   })
 })
 
-/* ---------- Body parser ONLY for methods that carry a body ---------- */
+/* ---------- EARLY IPN register (pre-body-parser & pre-CORS) ----------
+   Accepts GET or POST, tolerates empty body, defaults to <server>/pesapal/ipn
+*/
+app.all('/pesapal/registerIPN', async (req, res) => {
+  try {
+    if (!PESA_KEY || !PESA_SECRET) {
+      return res.status(500).json({ ok:false, error:'Missing PESA_CONSUMER_KEY/SECRET' })
+    }
+    const origin = serverOrigin(req)
+    const ipnUrl = req.query?.url || `${origin}/pesapal/ipn`
+
+    const tokenResp = await axios.post(
+      `${PESA_URL}/api/Auth/RequestToken`,
+      { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
+      { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
+    )
+    const token = tokenResp?.data?.token
+    if (!token) throw new Error(`No token in response: ${JSON.stringify(tokenResp?.data)}`)
+
+    const { data } = await axios.post(
+      `${PESA_URL}/api/URLSetup/RegisterIPN`,
+      { url: ipnUrl, ipn_notification_type: 'GET' },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
+    )
+    res.json({ ok: true, ...data }) // { ipn_id, url, ipn_notification_type }
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  }
+})
+
+/* ---------- Body parser ONLY for methods with bodies ---------- */
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
@@ -132,7 +181,7 @@ const corsOptions = {
 app.options('*', cors(corsOptions))
 app.use(cors(corsOptions))
 
-/* ---------- JSON error handler so we never emit HTML errors ---------- */
+/* ---------- JSON error handler (no HTML error pages) ---------- */
 app.use((err, _req, res, _next) => {
   if (err) return res.status(400).json({ ok:false, error: err.message || 'Bad Request' })
 })
@@ -180,6 +229,7 @@ app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (
    Flutterwave verify (optional)
 ========================= */
 const hasFlwSecret = !!FLW_SECRET
+
 async function verifyFlwAndActivate({ id, uid, tx_ref }) {
   if (!id || !uid || !tx_ref) return { ok:false, status:400, error:'Missing id, uid or tx_ref' }
   if (!hasFlwSecret)         return { ok:false, status:500, error:'Server missing FLW_SECRET' }
@@ -224,6 +274,7 @@ app.post(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) =>
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
+
 app.get(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => {
   try {
     const { id, uid, tx_ref } = req.query || {}
@@ -246,6 +297,7 @@ async function isManualProEnabled() {
     return !!(snap.exists && snap.get('allowManualPro') === true)
   } catch { return false }
 }
+
 app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
@@ -274,6 +326,7 @@ function requireAdmin(req, res) {
   if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
   return true
 }
+
 app.post('/admin/setPro', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
@@ -311,6 +364,8 @@ async function pesaToken() {
     throw new Error(`RequestToken failed${status ? ` [${status}]` : ''}: ${JSON.stringify(body) || msg}`)
   }
 }
+
+// Optional probe for debugging keys quickly
 app.get('/pesapal/tokenTest', async (_req, res) => {
   try {
     const token = await pesaToken()
@@ -319,20 +374,8 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
     res.status(500).json({ ok:false, error: e?.message || String(e) })
   }
 })
-app.post('/pesapal/registerIPN', async (req, res) => {
-  try {
-    const token = await pesaToken()
-    const ipnUrl = req.body?.url || `${serverOrigin(req)}/pesapal/ipn`
-    const { data } = await axios.post(
-      `${PESA_URL}/api/URLSetup/RegisterIPN`,
-      { url: ipnUrl, ipn_notification_type: 'GET' },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
-    )
-    res.json({ ok: true, ...data }) // includes data.ipn_id
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
-  }
-})
+
+// Create order -> returns redirect_url
 app.post('/pesapal/createOrder', async (req, res) => {
   try {
     const token = await pesaToken()
@@ -361,11 +404,13 @@ app.post('/pesapal/createOrder', async (req, res) => {
       body,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
+    // { order_tracking_id, merchant_reference, redirect_url }
     res.json({ ok: true, ...data, merchant_reference: merchantRef })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
+
 async function pesaFetchStatus(orderTrackingId) {
   const token = await pesaToken()
   const { data } = await axios.get(
@@ -374,6 +419,7 @@ async function pesaFetchStatus(orderTrackingId) {
   )
   return data
 }
+
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
@@ -384,6 +430,7 @@ async function handlePesaNotification(params, res) {
     const match = mr.match(/^certify_(.+?)_/)
     const uid = match ? match[1] : null
 
+    // COMPLETED => flip Pro (status_code === 1)
     if (uid && status?.status_code === 1) {
       await db.collection('users').doc(uid).set({
         pro: true,
@@ -399,6 +446,7 @@ async function handlePesaNotification(params, res) {
       }, { merge: true })
     }
 
+    // IPN: respond with ack JSON
     if (params?.OrderNotificationType === 'IPNCHANGE') {
       return res.json({
         orderNotificationType: 'IPNCHANGE',
@@ -407,12 +455,14 @@ async function handlePesaNotification(params, res) {
         status: 200
       })
     }
+    // Non-IPN (browser/debug)
     return res.json({ ok:true, status })
   } catch (e) {
     const err = e?.response?.data || e?.message || String(e)
     return res.status(500).json({ ok:false, error: err })
   }
 }
+
 app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
