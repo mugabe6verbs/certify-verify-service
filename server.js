@@ -7,44 +7,27 @@ import cors from 'cors'
 
 /* =========================
    Environment Variables
-   =========================
-   Firebase Admin (required):
-     FIREBASE_PROJECT_ID
-     FIREBASE_CLIENT_EMAIL
-     FIREBASE_PRIVATE_KEY        (with \n escaped)
-
-   Hosting / CORS:
-     ALLOW_ORIGINS               (comma-separated)
-     PUBLIC_SITE_URL             (your Firebase hosting URL; used in callbacks)
-
-   Features (optional):
-     ALLOW_MANUAL_PRO=true
-     ADMIN_TOKEN                 (for /admin/setPro)
-
-   Flutterwave (optional):
-     FLW_SECRET
-
-   Pesapal (demo/live):
-     PESA_CONSUMER_KEY
-     PESA_CONSUMER_SECRET
-     PESA_BASE=demo|live
-     PESA_IPN_ID                 (set after /pesapal/registerIPN)
-*/
+========================= */
 const {
   PORT = 8080,
 
+  // Firebase Admin
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
 
-  ALLOW_ORIGINS = 'http://localhost:5173,https://certificate-generator-345be.web.app,https://certificate-generator-345be.firebaseapp.com',
+  // CORS + site
+  ALLOW_ORIGINS = 'http://localhost:5173,https://certificate-generator-345be.web.app,https://certificate-generator-345be.firebaseapp.com,https://certify-verify-service-2.onrender.com',
   PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
 
+  // Feature flags
   ALLOW_MANUAL_PRO,
   ADMIN_TOKEN,
 
+  // Flutterwave (optional)
   FLW_SECRET,
 
+  // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',
@@ -56,7 +39,6 @@ const {
 ========================= */
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
 const mask  = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
-
 function serverOrigin(req) {
   const xfProto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || 'https'
   const host = req.headers.host
@@ -91,7 +73,7 @@ try {
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
 /* =========================
-   Pesapal config (defined early so health can run pre-CORS)
+   Pesapal config (for early health)
 ========================= */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
@@ -101,12 +83,11 @@ const PESA_LIVE   = 'https://pay.pesapal.com/v3'
 const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
 
 /* =========================
-   Express
+   Express app
 ========================= */
 const app = express()
-app.use(express.json({ limit: '2mb' }))
 
-/* ---------- EARLY health endpoints (pre-CORS) ---------- */
+/* ---------- EARLY health endpoints (pre-body-parser & pre-CORS) ---------- */
 app.get('/pesapal/health', (_req, res) => {
   res.json({
     ok: true,
@@ -122,9 +103,17 @@ app.get(['/health','/api/health'], (_req, res) => {
   res.json({
     ok: true,
     projectId: FIREBASE_PROJECT_ID || null,
-    hasFirebaseCreds,
-    // allowList shown later after we build it
+    hasFirebaseCreds: !!hasFirebaseCreds
   })
+})
+
+/* ---------- Body parser ONLY for methods that carry a body ---------- */
+app.use((req, res, next) => {
+  const m = req.method
+  if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
+    return express.json({ limit: '2mb' })(req, res, next)
+  }
+  return next()
 })
 
 /* =========================
@@ -136,7 +125,7 @@ const corsOptions = {
     if (!origin || allowList.includes(origin)) return cb(null, true)
     return cb(new Error('Not allowed by CORS'))
   },
-  methods: ['GET','POST','OPTIONS'],
+  methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
   allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
   optionsSuccessStatus: 204
 }
@@ -257,7 +246,6 @@ async function isManualProEnabled() {
     return !!(snap.exists && snap.get('allowManualPro') === true)
   } catch { return false }
 }
-
 app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
@@ -281,15 +269,9 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
    Admin rescue endpoint
 ========================= */
 function requireAdmin(req, res) {
-  if (!ADMIN_TOKEN) {
-    res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' })
-    return false
-  }
+  if (!ADMIN_TOKEN) { res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' }); return false }
   const token = req.headers['x-admin-token']
-  if (!token || token !== ADMIN_TOKEN) {
-    res.status(403).json({ ok:false, error:'Forbidden (admin token)' })
-    return false
-  }
+  if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
   return true
 }
 app.post('/admin/setPro', async (req, res) => {
@@ -329,8 +311,6 @@ async function pesaToken() {
     throw new Error(`RequestToken failed${status ? ` [${status}]` : ''}: ${JSON.stringify(body) || msg}`)
   }
 }
-
-// Optional probe (useful while configuring keys)
 app.get('/pesapal/tokenTest', async (_req, res) => {
   try {
     const token = await pesaToken()
@@ -339,8 +319,6 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
     res.status(500).json({ ok:false, error: e?.message || String(e) })
   }
 })
-
-// Register IPN -> returns ipn_id (save to env PESA_IPN_ID then redeploy)
 app.post('/pesapal/registerIPN', async (req, res) => {
   try {
     const token = await pesaToken()
@@ -355,8 +333,6 @@ app.post('/pesapal/registerIPN', async (req, res) => {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-
-// Create order -> returns redirect_url
 app.post('/pesapal/createOrder', async (req, res) => {
   try {
     const token = await pesaToken()
@@ -385,13 +361,11 @@ app.post('/pesapal/createOrder', async (req, res) => {
       body,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
-    // data: { order_tracking_id, merchant_reference, redirect_url }
     res.json({ ok: true, ...data, merchant_reference: merchantRef })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-
 async function pesaFetchStatus(orderTrackingId) {
   const token = await pesaToken()
   const { data } = await axios.get(
@@ -400,7 +374,6 @@ async function pesaFetchStatus(orderTrackingId) {
   )
   return data
 }
-
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
@@ -411,7 +384,6 @@ async function handlePesaNotification(params, res) {
     const match = mr.match(/^certify_(.+?)_/)
     const uid = match ? match[1] : null
 
-    // COMPLETED => flip Pro (status_code === 1)
     if (uid && status?.status_code === 1) {
       await db.collection('users').doc(uid).set({
         pro: true,
@@ -427,7 +399,6 @@ async function handlePesaNotification(params, res) {
       }, { merge: true })
     }
 
-    // IPN: respond with ack JSON
     if (params?.OrderNotificationType === 'IPNCHANGE') {
       return res.json({
         orderNotificationType: 'IPNCHANGE',
@@ -436,14 +407,12 @@ async function handlePesaNotification(params, res) {
         status: 200
       })
     }
-    // Non-IPN (browser/debug)
     return res.json({ ok:true, status })
   } catch (e) {
     const err = e?.response?.data || e?.message || String(e)
     return res.status(500).json({ ok:false, error: err })
   }
 }
-
 app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
