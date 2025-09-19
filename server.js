@@ -1,8 +1,14 @@
-// server.js
+// server.js — Certify backend (Pesapal + optional Flutterwave)
+// Node 18+ (global fetch available). Run: node server.js
+
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
 import cors from 'cors'
+import helmet from 'helmet'
+import compression from 'compression'
+import rateLimit from 'express-rate-limit'
+import morgan from 'morgan'
 
 /* ---------- ENV ---------- */
 const {
@@ -27,12 +33,12 @@ const {
   // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
-  PESA_BASE = 'demo',
+  PESA_BASE = 'demo',  // 'demo' | 'live'
   PESA_IPN_ID
 } = process.env
 
-const clean  = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
-const mask   = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
+const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
+const mask = (s) => (s && s.length >= 8 ? s.slice(0, 4) + '…' + s.slice(-4) : '(empty)')
 
 /* ---------- Firebase Admin ---------- */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
@@ -59,15 +65,17 @@ try {
 
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
-/* ---------- Express & CORS (APPLY FIRST!) ---------- */
+/* ---------- Express & Security ---------- */
 const app = express()
 app.use(express.json({ limit: '2mb' }))
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }))
+app.use(compression())
+app.use(morgan('tiny'))
 
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsMw = cors({
   origin(origin, cb) {
-    // allow no-Origin (curl, server-to-server) and allowed web origins
-    if (!origin || allowList.includes(origin)) return cb(null, true)
+    if (!origin || allowList.includes(origin)) return cb(null, true) // allow server-to-server and whitelisted origins
     return cb(new Error('Not allowed by CORS'))
   },
   methods: ['GET','POST','OPTIONS'],
@@ -77,6 +85,9 @@ const corsMw = cors({
 app.use(corsMw)
 app.options('*', corsMw)
 
+// Basic rate limit (tune as needed)
+app.use(rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false }))
+
 /* Small helper to ensure health endpoints always send ACAO */
 function setCorsForHealth(req, res) {
   const origin = req.headers.origin
@@ -84,6 +95,35 @@ function setCorsForHealth(req, res) {
     res.set('Access-Control-Allow-Origin', origin || '*')
     res.set('Vary', 'Origin')
   }
+}
+
+/* ---------- Helpers ---------- */
+function bad(res, code, msg, extra = {}) {
+  return res.status(code).json({ ok: false, error: msg, ...extra })
+}
+
+async function requireAuth(req, res) {
+  const authz = req.headers.authorization || ''
+  const m = authz.match(/^Bearer\s+(.+)$/i)
+  if (!m) throw new Error('missing_bearer')
+  const token = m[1]
+  try {
+    const decoded = await admin.auth().verifyIdToken(token)
+    return decoded // { uid, ... }
+  } catch (e) {
+    throw new Error('invalid_token')
+  }
+}
+
+function isAdmin(req) {
+  const token = req.headers['x-admin-token'] || req.headers['X-Admin-Token']
+  return ADMIN_TOKEN && token === ADMIN_TOKEN
+}
+
+function serverOrigin(req) {
+  const xfProto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || 'https'
+  const host = req.headers.host
+  return `${xfProto}://${host}`
 }
 
 /* ---------- Health & Home ---------- */
@@ -111,7 +151,6 @@ app.get('/', (req, res) => {
       </ul>
       <p>Health: <a href="/health">/health</a></p>
       <p>Email link endpoint: <code>POST /makeEmailLink</code></p>
-      <p>Flutterwave verify (optional): <code>POST /verifyFlw</code></p>
       <p>Pesapal health: <a href="/pesapal/health">/pesapal/health</a></p>
     </body></html>
   `)
@@ -120,36 +159,47 @@ app.get('/', (req, res) => {
 /* ---------- Passwordless email link ---------- */
 app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+    if (!db) return bad(res, 500, 'server_missing_firebase')
     const { email } = req.body || {}
-    if (!email) return res.status(400).json({ ok:false, error:'Missing email' })
+    if (!email) return bad(res, 400, 'missing_email')
     const actionCodeSettings = { url: `${clean(PUBLIC_SITE_URL)}/finish-signin`, handleCodeInApp: true }
     const link = await admin.auth().generateSignInWithEmailLink(String(email), actionCodeSettings)
     res.json({ ok:true, link })
   } catch (e) {
-    res.status(500).json({ ok:false, error: e?.message || String(e) })
+    res.status(500).json({ ok:false, error: 'email_link_failed' })
   }
 })
 
-/* ---------- Flutterwave (optional) ---------- */
+/* ---------- Flutterwave (optional; locked down) ---------- */
 const hasFlwSecret = !!FLW_SECRET
-async function verifyFlwAndActivate({ id, uid, tx_ref }) {
-  if (!id || !uid || !tx_ref) return { ok:false, status:400, error:'Missing id, uid or tx_ref' }
-  if (!hasFlwSecret)         return { ok:false, status:500, error:'Server missing FLW_SECRET' }
-  if (!db)                   return { ok:false, status:500, error:'Server missing Firebase credentials' }
+
+function parseUidFromTxRef(txref) {
+  const m = String(txref || '').match(/^certify_([^_]+)_\d+/)
+  return m ? m[1] : null
+}
+
+async function verifyFlwAndActivate({ id, tx_ref }, callerUid) {
+  if (!id || !tx_ref) return { ok:false, status:400, error:'missing_id_or_txref' }
+  if (!hasFlwSecret)    return { ok:false, status:500, error:'server_missing_flw_secret' }
+  if (!db)              return { ok:false, status:500, error:'server_missing_firebase' }
 
   const vr = await axios.get(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(id)}/verify`, {
     headers: { Authorization: `Bearer ${FLW_SECRET}` }
   })
   const d = vr?.data?.data
-  if (!d) return { ok:false, status:400, error:'Invalid verify response' }
+  if (!d) return { ok:false, status:400, error:'invalid_verify_response' }
 
   const statusOk   = d.status === 'successful'
   const currencyOk = String(d.currency || '').toUpperCase() === 'USD'
   const txRefOk    = String(d.tx_ref || '') === String(tx_ref)
+  const refUid     = parseUidFromTxRef(d.tx_ref)
+
   if (!statusOk || !currencyOk || !txRefOk) {
     return { ok:false, status:400, reason:'verify_failed', got:{ status:d.status, currency:d.currency, tx_ref:d.tx_ref } }
   }
+  // Ensure the paying user becomes Pro — use the uid inside tx_ref or the authenticated caller
+  const uid = refUid || callerUid
+  if (!uid) return { ok:false, status:400, error:'cannot_resolve_uid' }
 
   await db.collection('users').doc(String(uid)).set({
     pro: true,
@@ -168,23 +218,16 @@ async function verifyFlwAndActivate({ id, uid, tx_ref }) {
   return { ok:true, uid, tx_ref, amount:d.amount, currency:d.currency }
 }
 
+// Require Authorization for verifyFlw (prevents spoofed uid flips)
 app.post(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => {
   try {
-    const out = await verifyFlwAndActivate(req.body || {})
+    const decoded = await requireAuth(req, res) // throws on fail
+    const { id, tx_ref } = req.body || {}
+    const out = await verifyFlwAndActivate({ id, tx_ref }, decoded.uid)
     if (!out.ok) return res.status(out.status || 500).json(out)
     res.json(out)
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
-  }
-})
-app.get(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => {
-  try {
-    const { id, uid, tx_ref } = req.query || {}
-    const out = await verifyFlwAndActivate({ id, uid, tx_ref })
-    if (!out.ok) return res.status(out.status || 500).json(out)
-    res.json(out)
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  } catch {
+    res.status(401).json({ ok:false, error:'unauthorized' })
   }
 })
 
@@ -197,73 +240,77 @@ async function isManualProEnabled() {
     return !!(snap.exists && snap.get('allowManualPro') === true)
   } catch { return false }
 }
+
 app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-    const { idToken } = req.body || {}
-    if (!idToken) return res.status(400).json({ ok:false, error:'Missing idToken' })
-    const decoded = await admin.auth().verifyIdToken(String(idToken))
-    const uid = decoded.uid
-    if (!(await isManualProEnabled())) return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
-    await db.collection('users').doc(uid).set({
+    if (!db) return bad(res, 500, 'server_missing_firebase')
+    const decoded = await requireAuth(req, res) // uses Authorization header now
+    if (!(await isManualProEnabled())) return bad(res, 403, 'manual_pro_disabled')
+    await db.collection('users').doc(decoded.uid).set({
       pro: true,
       proSetAt: admin.firestore.FieldValue.serverTimestamp(),
       lastPayment: { provider: 'manual' }
     }, { merge: true })
-    res.json({ ok:true, uid })
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+    res.json({ ok:true, uid: decoded.uid })
+  } catch {
+    res.status(401).json({ ok:false, error:'unauthorized' })
   }
 })
 
 /* ---------- Admin rescue ---------- */
 function requireAdmin(req, res) {
-  if (!ADMIN_TOKEN) {
-    res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' })
-    return false
-  }
+  if (!ADMIN_TOKEN) { bad(res, 500, 'server_missing_admin_token'); return false }
   const token = req.headers['x-admin-token']
-  if (!token || token !== ADMIN_TOKEN) {
-    res.status(403).json({ ok:false, error:'Forbidden (admin token)' })
-    return false
-  }
+  if (!token || token !== ADMIN_TOKEN) { bad(res, 403, 'forbidden_admin'); return false }
   return true
 }
+
 app.post('/admin/setPro', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+    if (!db) return bad(res, 500, 'server_missing_firebase')
     const { uid, pro = true, note = 'admin setPro' } = req.body || {}
-    if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
+    if (!uid) return bad(res, 400, 'missing_uid')
     await db.collection('users').doc(String(uid)).set({
       pro: !!pro,
       proSetAt: admin.firestore.FieldValue.serverTimestamp(),
       lastPayment: { provider:'admin', note }
     }, { merge: true })
     res.json({ ok:true, uid:String(uid), pro:!!pro })
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  } catch {
+    res.status(500).json({ ok:false, error:'admin_setpro_failed' })
   }
 })
 
 /* ---------- Pesapal ---------- */
-const PESA_KEY    = clean(PESA_CONSUMER_KEY)
+const PESA_KEY  = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
-const PESA_MODE   = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
-const PESA_DEMO   = 'https://cybqa.pesapal.com/pesapalv3'
-const PESA_LIVE   = 'https://pay.pesapal.com/v3'
-const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
+const PESA_MODE = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
+const PESA_DEMO = 'https://cybqa.pesapal.com/pesapalv3'
+const PESA_LIVE = 'https://pay.pesapal.com/v3'
+const PESA_URL  = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
 
-function serverOrigin(req) {
-  const xfProto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || 'https'
-  const host = req.headers.host
-  return `${xfProto}://${host}`
+// lightweight token cache (avoid RequestToken spam)
+let pesaTok = { token: null, expAt: 0 }
+async function pesaToken() {
+  const now = Date.now()
+  if (pesaTok.token && pesaTok.expAt > now + 5000) return pesaTok.token
+  if (!PESA_KEY || !PESA_SECRET) throw new Error('missing_pesapal_keys')
+  const { data } = await axios.post(
+    `${PESA_URL}/api/Auth/RequestToken`,
+    { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
+    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
+  )
+  const tok = data?.token
+  if (!tok) throw new Error('no_token_in_response')
+  pesaTok = { token: tok, expAt: now + 20 * 60 * 1000 } // ~20 min TTL (tune if API returns expires_in)
+  return tok
 }
 
 app.get('/pesapal/health', (req, res) => {
   setCorsForHealth(req, res)
   res.json({
-    ok: true,
+    ok: !!(PESA_KEY && PESA_SECRET),
     base: PESA_MODE,
     url: PESA_URL,
     keyPreview: mask(PESA_KEY),
@@ -273,35 +320,10 @@ app.get('/pesapal/health', (req, res) => {
   })
 })
 
-async function pesaToken() {
-  if (!PESA_KEY || !PESA_SECRET) throw new Error('Missing PESA_CONSUMER_KEY/SECRET')
-  try {
-    const { data } = await axios.post(
-      `${PESA_URL}/api/Auth/RequestToken`,
-      { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
-      { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
-    )
-    if (!data?.token) throw new Error(`No token in response: ${JSON.stringify(data)}`)
-    return data.token
-  } catch (e) {
-    const status = e?.response?.status
-    const body   = e?.response?.data
-    const msg    = e?.message
-    throw new Error(`RequestToken failed${status ? ` [${status}]` : ''}: ${JSON.stringify(body) || msg}`)
-  }
-}
-
-app.get('/pesapal/tokenTest', async (_req, res) => {
-  try {
-    const token = await pesaToken()
-    res.json({ ok:true, token: token ? 'RECEIVED' : 'EMPTY' })
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.message || String(e) })
-  }
-})
-
+// Admin-only: register IPN URL
 app.post('/pesapal/registerIPN', async (req, res) => {
   try {
+    if (!isAdmin(req)) return bad(res, 403, 'forbidden_admin')
     const token = await pesaToken()
     const ipnUrl = req.body?.url || `${serverOrigin(req)}/pesapal/ipn`
     const { data } = await axios.post(
@@ -310,24 +332,38 @@ app.post('/pesapal/registerIPN', async (req, res) => {
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
     res.json({ ok: true, ...data }) // data.ipn_id
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  } catch {
+    res.status(500).json({ ok:false, error: 'ipn_register_failed' })
   }
 })
 
+// Create order (REQUIRES Authorization; uid is taken from ID token)
 app.post('/pesapal/createOrder', async (req, res) => {
   try {
+    const decoded = await requireAuth(req, res)
+    if (!db) return bad(res, 500, 'server_missing_firebase')
     const token = await pesaToken()
-    const { uid, amount = 15, currency = 'USD', email, first_name = '', last_name = '' } = req.body || {}
-    if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
-    if (!PESA_IPN_ID) return res.status(500).json({ ok:false, error:'Server missing PESA_IPN_ID (register IPN first)' })
+    const {
+      amount = 15,
+      currency = 'KES',     // ensure your Pesapal account supports the chosen currency
+      email,
+      first_name = '',
+      last_name = '',
+      plan = 'pro',
+      period = 'monthly'
+    } = req.body || {}
 
+    if (!PESA_IPN_ID) return bad(res, 500, 'missing_pesa_ipn_id')
+    if (!Number.isFinite(+amount) || +amount < 1) return bad(res, 400, 'invalid_amount')
+    if (!['KES','UGX','USD'].includes(String(currency).toUpperCase())) return bad(res, 400, 'invalid_currency')
+
+    const uid = decoded.uid
     const merchantRef = `certify_${uid}_${Date.now()}`
     const body = {
       id: merchantRef,
-      currency,
+      currency: String(currency).toUpperCase(),
       amount: Number(amount),
-      description: 'Certify Pro (lifetime)',
+      description: `Certify ${plan} (${period})`,
       callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade`,
       notification_id: PESA_IPN_ID,
       billing_address: {
@@ -343,9 +379,12 @@ app.post('/pesapal/createOrder', async (req, res) => {
       body,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
-    res.json({ ok: true, ...data, merchant_reference: merchantRef })
+
+    const redirect_url = data?.redirect_url || data?.payment_url || data?.redirectUrl || null
+    if (!redirect_url) return bad(res, 502, 'no_redirect_url')
+    res.json({ ok: true, redirect_url, merchant_reference: merchantRef })
   } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+    res.status(401).json({ ok:false, error: e?.message === 'invalid_token' ? 'unauthorized' : 'order_create_failed' })
   }
 })
 
@@ -361,14 +400,19 @@ async function pesaFetchStatus(orderTrackingId) {
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
-    if (!orderTrackingId) return res.status(400).json({ ok:false, error:'Missing OrderTrackingId' })
+    if (!orderTrackingId) return bad(res, 400, 'missing_order_tracking_id')
 
     const status = await pesaFetchStatus(orderTrackingId)
     const mr = String(status?.merchant_reference || '')
     const match = mr.match(/^certify_(.+?)_/)
     const uid = match ? match[1] : null
 
-    if (uid && status?.status_code === 1) {
+    // Pesapal demo/live codes differ; treat "1" or a success string as paid
+    const paid =
+      status?.status_code === 1 ||
+      /^(COMPLETED|PAID|SUCCESS|CONFIRMED)$/i.test(status?.payment_status || status?.payment_status_description || '')
+
+    if (db && uid && paid) {
       await db.collection('users').doc(uid).set({
         pro: true,
         proSetAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -378,7 +422,7 @@ async function handlePesaNotification(params, res) {
           merchant_reference: mr,
           amount: status?.amount,
           currency: status?.currency,
-          status: status?.payment_status_description
+          status: status?.payment_status_description || status?.payment_status || 'SUCCESS'
         }
       }, { merge: true })
     }
@@ -391,9 +435,9 @@ async function handlePesaNotification(params, res) {
         status: 200
       })
     }
-    return res.json({ ok:true, status })
-  } catch (e) {
-    return res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+    return res.json({ ok:true })
+  } catch {
+    return res.status(500).json({ ok:false, error:'ipn_handler_failed' })
   }
 }
 
@@ -401,4 +445,5 @@ app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
 /* ---------- Start ---------- */
-app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
+app.use((req, res) => bad(res, 404, 'not_found'))
+app.listen(PORT, () => console.log(`✅ Certify verify service listening on :${PORT}`))
