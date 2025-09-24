@@ -1,6 +1,3 @@
-// server.js — Certify backend (Pesapal + optional Flutterwave)
-// Node 18+ (global fetch available). Run: node server.js
-
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
@@ -34,7 +31,15 @@ const {
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',  // 'demo' | 'live'
-  PESA_IPN_ID
+  PESA_IPN_ID,
+
+  // Pricing (server-authoritative)
+  PRICE_MONTHLY_USD = '15',
+  PRICE_ANNUAL_USD  = '148',
+  PRICE_MONTHLY_KES = '1500',
+  PRICE_ANNUAL_KES  = '14750',
+  PRICE_MONTHLY_UGX = '55000',
+  PRICE_ANNUAL_UGX  = '539000'
 } = process.env
 
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
@@ -65,10 +70,36 @@ try {
 
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
+/* ---------- Pricing (server-authoritative) ---------- */
+// NEW: server is source of truth for amounts, the client only sends {period, currency}
+const PRICES = {
+  monthly: {
+    USD: Number(PRICE_MONTHLY_USD) || 15,
+    KES: Number(PRICE_MONTHLY_KES) || 1500,
+    UGX: Number(PRICE_MONTHLY_UGX) || 55000
+  },
+  annual: {
+    USD: Number(PRICE_ANNUAL_USD) || 148,
+    KES: Number(PRICE_ANNUAL_KES) || 14750,
+    UGX: Number(PRICE_ANNUAL_UGX) || 539000
+  }
+}
+const SUPPORTED_CURRENCIES = ['USD','KES','UGX']
+
 /* ---------- Express & Security ---------- */
 const app = express()
+app.set('trust proxy', true) // NEW: respect x-forwarded headers
 app.use(express.json({ limit: '2mb' }))
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }))
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}))
+// Optional: HSTS if behind HTTPS
+app.use((req, res, next) => {
+  if (req.secure || (req.headers['x-forwarded-proto'] || '').toString().includes('https')) {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains')
+  }
+  next()
+})
 app.use(compression())
 app.use(morgan('tiny'))
 
@@ -83,6 +114,13 @@ const corsMw = cors({
   optionsSuccessStatus: 204
 })
 app.use(corsMw)
+// NEW: turn CORS errors into JSON instead of crashing
+app.use((err, req, res, next) => {
+  if (err && err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ ok:false, error:'cors_rejected_origin' })
+  }
+  return next(err)
+})
 app.options('*', corsMw)
 
 // Basic rate limit (tune as needed)
@@ -121,9 +159,9 @@ function isAdmin(req) {
 }
 
 function serverOrigin(req) {
-  const xfProto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || 'https'
+  const proto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0] || (req.secure ? 'https' : 'http')
   const host = req.headers.host
-  return `${xfProto}://${host}`
+  return `${proto}://${host}`
 }
 
 /* ---------- Health & Home ---------- */
@@ -150,10 +188,22 @@ app.get('/', (req, res) => {
         <li>ALLOW_MANUAL_PRO: <code>${String(ALLOW_MANUAL_PRO_ENV)}</code></li>
       </ul>
       <p>Health: <a href="/health">/health</a></p>
+      <p>Pricing: <a href="/pricing">/pricing</a> · <a href="/pricing/currencies">/pricing/currencies</a></p>
       <p>Email link endpoint: <code>POST /makeEmailLink</code></p>
       <p>Pesapal health: <a href="/pesapal/health">/pesapal/health</a></p>
     </body></html>
   `)
+})
+
+/* ---------- Pricing endpoints (optional, helpful for FE) ---------- */
+// NEW: expose currencies & price table for the frontend
+app.get(['/pricing/currencies'], (req, res) => {
+  setCorsForHealth(req, res)
+  res.json({ ok:true, currencies: SUPPORTED_CURRENCIES })
+})
+app.get(['/pricing'], (req, res) => {
+  setCorsForHealth(req, res)
+  res.json({ ok:true, prices: PRICES })
 })
 
 /* ---------- Passwordless email link ---------- */
@@ -184,20 +234,20 @@ async function verifyFlwAndActivate({ id, tx_ref }, callerUid) {
   if (!db)              return { ok:false, status:500, error:'server_missing_firebase' }
 
   const vr = await axios.get(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(id)}/verify`, {
-    headers: { Authorization: `Bearer ${FLW_SECRET}` }
+    headers: { Authorization: `Bearer ${FLW_SECRET}` },
+    timeout: 15000 // NEW
   })
   const d = vr?.data?.data
   if (!d) return { ok:false, status:400, error:'invalid_verify_response' }
 
   const statusOk   = d.status === 'successful'
-  const currencyOk = String(d.currency || '').toUpperCase() === 'USD'
+  const currencyOk = ['USD','KES','UGX'].includes(String(d.currency || '').toUpperCase()) // NEW: permit regional
   const txRefOk    = String(d.tx_ref || '') === String(tx_ref)
   const refUid     = parseUidFromTxRef(d.tx_ref)
 
   if (!statusOk || !currencyOk || !txRefOk) {
     return { ok:false, status:400, reason:'verify_failed', got:{ status:d.status, currency:d.currency, tx_ref:d.tx_ref } }
   }
-  // Ensure the paying user becomes Pro — use the uid inside tx_ref or the authenticated caller
   const uid = refUid || callerUid
   if (!uid) return { ok:false, status:400, error:'cannot_resolve_uid' }
 
@@ -283,12 +333,25 @@ app.post('/admin/setPro', async (req, res) => {
 })
 
 /* ---------- Pesapal ---------- */
-const PESA_KEY  = clean(PESA_CONSUMER_KEY)
+const PESA_KEY    = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
-const PESA_MODE = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
-const PESA_DEMO = 'https://cybqa.pesapal.com/pesapalv3'
-const PESA_LIVE = 'https://pay.pesapal.com/v3'
-const PESA_URL  = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
+const PESA_MODE   = (PESA_BASE || 'demo').toLowerCase() // 'demo' | 'live'
+const PESA_DEMO   = 'https://cybqa.pesapal.com/pesapalv3'
+const PESA_LIVE   = 'https://pay.pesapal.com/v3'
+const PESA_URL    = PESA_MODE === 'live' ? PESA_LIVE : PESA_DEMO
+
+// Backoff helper (NEW)
+const delay = (ms) => new Promise(r => setTimeout(r, ms))
+async function withBackoff(fn, max = 2, base = 300) {
+  let i = 0
+  while (true) {
+    try { return await fn(i) } catch (e) {
+      if (i >= max) throw e
+      const ms = Math.floor(base * Math.pow(2, i) * (1 + Math.random() * 0.2))
+      await delay(ms); i++
+    }
+  }
+}
 
 // lightweight token cache (avoid RequestToken spam)
 let pesaTok = { token: null, expAt: 0 }
@@ -329,7 +392,7 @@ app.post('/pesapal/registerIPN', async (req, res) => {
     const { data } = await axios.post(
       `${PESA_URL}/api/URLSetup/RegisterIPN`,
       { url: ipnUrl, ipn_notification_type: 'GET' },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
     )
     res.json({ ok: true, ...data }) // data.ipn_id
   } catch {
@@ -342,59 +405,85 @@ app.post('/pesapal/createOrder', async (req, res) => {
   try {
     const decoded = await requireAuth(req, res)
     if (!db) return bad(res, 500, 'server_missing_firebase')
+    if (!PESA_IPN_ID) return bad(res, 500, 'missing_pesa_ipn_id')
+
     const token = await pesaToken()
     const {
-      amount = 15,
-      currency = 'KES',     // ensure your Pesapal account supports the chosen currency
+      // ignore client 'amount'; compute server-side:
+      currency = 'KES',         // KES | UGX | USD
+      period = 'monthly',       // 'monthly' | 'annual'
       email,
-      first_name = '',
-      last_name = '',
-      plan = 'pro',
-      period = 'monthly'
+      name,                     // single full name from UI
+      first_name = '',          // fallback
+      last_name  = ''
     } = req.body || {}
 
-    if (!PESA_IPN_ID) return bad(res, 500, 'missing_pesa_ipn_id')
-    if (!Number.isFinite(+amount) || +amount < 1) return bad(res, 400, 'invalid_amount')
-    if (!['KES','UGX','USD'].includes(String(currency).toUpperCase())) return bad(res, 400, 'invalid_currency')
+    const cur = String(currency).toUpperCase()
+    if (!SUPPORTED_CURRENCIES.includes(cur)) return bad(res, 400, 'invalid_currency')
+    const per = period === 'annual' ? 'annual' : 'monthly'
+    const amount = PRICES[per][cur]
+    if (!Number.isFinite(+amount) || +amount < 1) return bad(res, 500, 'price_unavailable')
 
     const uid = decoded.uid
     const merchantRef = `certify_${uid}_${Date.now()}`
+    const [fn, ln] = (String(name || '').trim().split(/\s+/).length >= 2)
+      ? [String(name).trim().split(/\s+/).slice(0, -1).join(' '), String(name).trim().split(/\s+/).slice(-1).join(' ')]
+      : [first_name, last_name]
+
     const body = {
       id: merchantRef,
-      currency: String(currency).toUpperCase(),
+      currency: cur,
       amount: Number(amount),
-      description: `Certify ${plan} (${period})`,
-      callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade`,
+      description: `Certify pro (${per})`,
+      callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade?pesapal=1`,
       notification_id: PESA_IPN_ID,
       billing_address: {
         email_address: email || 'guest@example.com',
-        first_name,
-        last_name,
-        country_code: 'UG'
+        first_name: fn || first_name || '',
+        last_name:  ln || last_name  || '',
+        country_code: cur === 'USD' ? 'US' : 'UG' // light hint only
       }
     }
 
-    const { data } = await axios.post(
-      `${PESA_URL}/api/Transactions/SubmitOrderRequest`,
-      body,
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
+    // NEW: persist pending order (allows verification on IPN)
+    await db.collection('payments').doc(merchantRef).set({
+      provider: 'pesapal',
+      uid,
+      period: per,
+      currency: cur,
+      expectedAmount: Number(amount),
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true })
+
+    const { data } = await withBackoff(
+      async () => axios.post(
+        `${PESA_URL}/api/Transactions/SubmitOrderRequest`,
+        body,
+        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 20000 }
+      ),
+      2, 350
     )
 
-    const redirect_url = data?.redirect_url || data?.payment_url || data?.redirectUrl || null
+    const redirect_url = data?.data?.redirect_url || data?.redirect_url || data?.payment_url || data?.redirectUrl || null
     if (!redirect_url) return bad(res, 502, 'no_redirect_url')
     res.json({ ok: true, redirect_url, merchant_reference: merchantRef })
   } catch (e) {
-    res.status(401).json({ ok:false, error: e?.message === 'invalid_token' ? 'unauthorized' : 'order_create_failed' })
+    const msg = e?.message === 'invalid_token' ? 'unauthorized' : (e?.response?.data?.error || 'order_create_failed')
+    res.status(e?.message === 'invalid_token' ? 401 : 500).json({ ok:false, error: msg })
   }
 })
 
 async function pesaFetchStatus(orderTrackingId) {
   const token = await pesaToken()
-  const { data } = await axios.get(
-    `${PESA_URL}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`,
-    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+  const { data } = await withBackoff(
+    async () => axios.get(
+      `${PESA_URL}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 15000 }
+    ),
+    2, 300
   )
-  return data
+  return data?.data || data
 }
 
 async function handlePesaNotification(params, res) {
@@ -412,19 +501,45 @@ async function handlePesaNotification(params, res) {
       status?.status_code === 1 ||
       /^(COMPLETED|PAID|SUCCESS|CONFIRMED)$/i.test(status?.payment_status || status?.payment_status_description || '')
 
-    if (db && uid && paid) {
-      await db.collection('users').doc(uid).set({
-        pro: true,
-        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastPayment: {
-          provider: 'pesapal',
+    if (db && uid) {
+      // NEW: cross-check the pending order
+      const payRef = db.collection('payments').doc(mr)
+      const snap = await payRef.get()
+      const exp = snap.exists ? snap.data() : null
+
+      // If we have an expected record, validate currency/amount before granting Pro
+      const currencyOk = exp ? String(status?.currency || '').toUpperCase() === String(exp.currency || '').toUpperCase() : true
+      const amountOk   = exp ? Number(status?.amount || 0) >= Number(exp.expectedAmount || 0) : true
+
+      if (paid && currencyOk && amountOk) {
+        await db.collection('users').doc(uid).set({
+          pro: true,
+          proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastPayment: {
+            provider: 'pesapal',
+            orderTrackingId,
+            merchant_reference: mr,
+            amount: status?.amount,
+            currency: status?.currency,
+            status: status?.payment_status_description || status?.payment_status || 'SUCCESS'
+          }
+        }, { merge: true })
+
+        await payRef.set({
+          status: 'paid',
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
           orderTrackingId,
-          merchant_reference: mr,
           amount: status?.amount,
-          currency: status?.currency,
-          status: status?.payment_status_description || status?.payment_status || 'SUCCESS'
-        }
-      }, { merge: true })
+          currency: status?.currency
+        }, { merge: true })
+      } else {
+        // record failed/invalid for troubleshooting
+        await payRef.set({
+          status: paid ? 'mismatch' : 'failed',
+          lastStatus: status || null,
+          lastUpdateAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true })
+      }
     }
 
     if (params?.OrderNotificationType === 'IPNCHANGE') {
@@ -436,7 +551,7 @@ async function handlePesaNotification(params, res) {
       })
     }
     return res.json({ ok:true })
-  } catch {
+  } catch (e) {
     return res.status(500).json({ ok:false, error:'ipn_handler_failed' })
   }
 }
