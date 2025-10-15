@@ -101,16 +101,33 @@ async function pesaToken(preferred = PESA_MODE) {
   throw lastErr
 }
 
-/* ============== App / CORS / Health ============== */
+/* ============== App / CORS / Middleware ============== */
 const app = express()
 app.set('trust proxy', 1) // Render/Proxies
 
-// Health before any CORS/body gates
+// Prepare allow list for CORS (reused later in Home page)
+const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
+
+// CORS - apply globally BEFORE route registration so health endpoints include CORS headers
+const corsOptions = {
+  origin(origin, cb) {
+    // Allow no-origin (curl/postman/server-to-server), or allow if listed
+    if (!origin || allowList.includes(origin)) return cb(null, true)
+    return cb(new Error('Not allowed by CORS'))
+  },
+  methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
+  allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
+  credentials: true,
+  optionsSuccessStatus: 204
+}
+app.options('*', cors(corsOptions))
+app.use(cors(corsOptions))
+
+/* ============== Health endpoints (CORS now applied) ============== */
 app.get(['/health','/api/health'], (_req, res) => {
   res.json({ ok: true, projectId: FIREBASE_PROJECT_ID || null, hasFirebaseCreds: !!hasFirebaseCreds })
 })
 
-// Pesapal health (optional probe=1)
 app.get('/pesapal/health', async (req, res) => {
   try {
     const probe = String(req.query.probe || '') === '1'
@@ -132,24 +149,21 @@ app.get('/pesapal/health', async (req, res) => {
   }
 })
 
-// Register IPN via GET or POST (no body required)
-app.all('/pesapal/registerIPN', async (req, res) => {
-  try {
-    const { token, base, url } = await pesaToken()
-    const origin = serverOrigin(req)
-    const ipnUrl = req.query?.url || req.body?.url || `${origin}/pesapal/ipn`
-    const { data } = await axios.post(
-      `${url}/api/URLSetup/RegisterIPN`,
-      { url: ipnUrl, ipn_notification_type: 'GET' },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
-    )
-    res.json({ ok:true, baseUsed: base, ...data }) // includes ipn_id
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
-  }
+/* ============== Debug routes list ============== */
+app.get('/debug/routes', (_req, res) => {
+  const routes = []
+  app._router.stack.forEach((m) => {
+    if (m.route && m.route.path) routes.push({ methods: Object.keys(m.route.methods), path: m.route.path })
+    else if (m.name === 'router' && m.handle?.stack) {
+      m.handle.stack.forEach((h) => {
+        if (h.route && h.route.path) routes.push({ methods: Object.keys(h.route.methods), path: h.route.path })
+      })
+    }
+  })
+  res.json({ ok:true, routes })
 })
 
-// JSON body only where needed
+/* ============== JSON body for specific methods (unchanged behaviour) ============== */
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
@@ -158,18 +172,7 @@ app.use((req, res, next) => {
   next()
 })
 
-// CORS
-const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
-const corsOptions = {
-  origin(origin, cb) { if (!origin || allowList.includes(origin)) return cb(null, true); cb(new Error('Not allowed by CORS')) },
-  methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
-  allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
-  optionsSuccessStatus: 204
-}
-app.options('*', cors(corsOptions))
-app.use(cors(corsOptions))
-
-// Home
+/* ============== Home page (info) ============== */
 app.get('/', (_req, res) => {
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   res.type('html').send(`
@@ -187,20 +190,6 @@ app.get('/', (_req, res) => {
       <p><strong>Register IPN:</strong> <a href="/pesapal/registerIPN">/pesapal/registerIPN</a></p>
     </body></html>
   `)
-})
-
-// Debug routes list
-app.get('/debug/routes', (_req, res) => {
-  const routes = []
-  app._router.stack.forEach((m) => {
-    if (m.route && m.route.path) routes.push({ methods: Object.keys(m.route.methods), path: m.route.path })
-    else if (m.name === 'router' && m.handle?.stack) {
-      m.handle.stack.forEach((h) => {
-        if (h.route && h.route.path) routes.push({ methods: Object.keys(h.route.methods), path: h.route.path })
-      })
-    }
-  })
-  res.json({ ok:true, routes })
 })
 
 /* ============== Email link (passwordless) ============== */
@@ -404,7 +393,7 @@ async function handlePesaNotification(params, res) {
     const match = mr.match(/^certify_(.+?)_/)
     const uid = match ? match[1] : null
 
-    if (uid && status?.status_code === 1) {
+    if (uid && status?.status_code === 1 && db) {
       await db.collection('users').doc(uid).set({
         pro: true,
         proSetAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -437,4 +426,7 @@ app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
 /* ============== Start ============== */
-app.listen(PORT, () => console.log(`verify service listening on :${PORT}`))
+app.listen(PORT, () => {
+  console.log(`verify service listening on :${PORT}`)
+  console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
+})
