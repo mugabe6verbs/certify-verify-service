@@ -37,6 +37,13 @@ function serverOrigin(req) {
   return `${xfProto}://${host}`
 }
 
+// NEW: strict, optional ISO-3166-1 alpha-2 validator (returns null if invalid)
+function normalizeCountryCode(input) {
+  if (!input) return null
+  const cc = String(input).trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(cc) ? cc : null
+}
+
 /* ============== Firebase Admin ============== */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
 const hasFirebaseCreds = !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && privateKey)
@@ -61,6 +68,7 @@ try {
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
 /* ============== Pricing (USD) ============== */
+// NOTE: Set PESA_CURRENCY=USD in your environment to default to USD globally.
 const CURRENCY = process.env.PESA_CURRENCY || 'KES'
 const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
@@ -304,14 +312,14 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
 /* ============== Pesapal: Subscribe handler (Monthly/Yearly) ============== */
 /**
  * Client POST body:
- *  { uid, planId: "pro_monthly" | "pro_yearly", email?, first_name?, last_name? }
+ *  { uid, planId: "pro_monthly" | "pro_yearly", email?, first_name?, last_name?, country_code? }
  * Response:
  *  { ok: true, redirect_url, order_tracking_id, merchant_reference, baseUsed }
  */
 async function subscribeHandler(req, res) {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-    const { uid, planId, email, first_name = '', last_name = '' } = req.body || {}
+    const { uid, planId, email, first_name = '', last_name = '', country_code: rawCountry } = req.body || {}
     if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
     if (!planId || !AMOUNT_BY_PLAN[planId]) return res.status(400).json({ ok:false, error:'Unknown planId' })
     if (!PESA_IPN_ID) return res.status(500).json({ ok:false, error:'Server missing PESA_IPN_ID (register IPN first)' })
@@ -321,6 +329,9 @@ async function subscribeHandler(req, res) {
 
     // Merchant reference encodes plan & uid for IPN decoding
     const merchantRef = `sub_${planId}_${uid}_${Date.now()}`
+
+    // Optional, validated ISO-3166-1 country code (omit if invalid/unknown)
+    const country_code = normalizeCountryCode(rawCountry)
 
     // Include cancellation_url and robust callback
     const payload = {
@@ -335,7 +346,7 @@ async function subscribeHandler(req, res) {
         email_address: email || 'guest@example.com',
         first_name,
         last_name,
-        country_code: 'UG'
+        ...(country_code ? { country_code } : {}) // <- only include when valid
       }
     }
 
@@ -486,5 +497,3 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
-
-
