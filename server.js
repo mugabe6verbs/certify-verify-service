@@ -20,18 +20,16 @@ const {
   ALLOW_MANUAL_PRO,
   ADMIN_TOKEN,
 
-  // Flutterwave (optional)
-  FLW_SECRET,
-
   // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
-  // demo | live | auto (auto = try both)
+  // 'demo' | 'live' | 'auto' (auto tries demo then live)
   PESA_BASE = 'auto',
+  // If you already have an IPN ID from Pesapal dashboard, set this
   PESA_IPN_ID
 } = process.env
 
-/* ============== Helpers ============== */
+/* ============== Small helpers ============== */
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
 const mask  = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
 function serverOrigin(req) {
@@ -63,6 +61,30 @@ try {
 }
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
+/* ============== Pricing (USD) ============== */
+const CURRENCY = 'USD'
+// Keep amounts aligned with your UI (src/lib/pricing.js)
+const AMOUNT_BY_PLAN = {
+  pro_monthly: 19,
+  pro_yearly: 190
+}
+const INTERVAL_BY_PLAN = {
+  pro_monthly: 'month',
+  pro_yearly: 'year'
+}
+function amountToPlanId(amount) {
+  const a = Number(amount)
+  if (a === 19) return 'pro_monthly'
+  if (a === 190) return 'pro_yearly'
+  return null
+}
+function addInterval(ms, interval) {
+  const d = new Date(ms)
+  if (interval === 'year') d.setUTCFullYear(d.getUTCFullYear() + 1)
+  else d.setUTCMonth(d.getUTCMonth() + 1)
+  return d.getTime()
+}
+
 /* ============== Pesapal config ============== */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
@@ -83,7 +105,7 @@ async function tokenFor(base) {
     { consumer_key: PESA_KEY, consumer_secret: PESA_SECRET },
     { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
   )
-  if (!data?.token) throw new Error(`No token in response: ${JSON.stringify(data)}`)
+  if (!data?.token) throw new Error(`No token in Pesapal token response: ${JSON.stringify(data)}`)
   return { token: data.token, base, url }
 }
 async function pesaToken(preferred = PESA_MODE) {
@@ -105,14 +127,13 @@ async function pesaToken(preferred = PESA_MODE) {
 const app = express()
 app.set('trust proxy', 1) // Render/Proxies
 
-// Prepare allow list for CORS (reused later in Home page)
+// Prepare allow list for CORS (reused on homepage for display)
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 
 // CORS - apply globally BEFORE route registration so health endpoints include CORS headers
 const corsOptions = {
   origin(origin, cb) {
-    // Allow no-origin (curl/postman/server-to-server), or allow if listed
-    if (!origin || allowList.includes(origin)) return cb(null, true)
+    if (!origin || allowList.includes(origin)) return cb(null, true) // allow server-to-server, curl, Postman
     return cb(new Error('Not allowed by CORS'))
   },
   methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
@@ -123,7 +144,16 @@ const corsOptions = {
 app.options('*', cors(corsOptions))
 app.use(cors(corsOptions))
 
-/* ============== Health endpoints (CORS now applied) ============== */
+// Body parser only when needed to keep GET small
+app.use((req, res, next) => {
+  const m = req.method
+  if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
+    return express.json({ limit: '2mb' })(req, res, next)
+  }
+  next()
+})
+
+/* ============== Health & Debug ============== */
 app.get(['/health','/api/health'], (_req, res) => {
   res.json({ ok: true, projectId: FIREBASE_PROJECT_ID || null, hasFirebaseCreds: !!hasFirebaseCreds })
 })
@@ -149,7 +179,6 @@ app.get('/pesapal/health', async (req, res) => {
   }
 })
 
-/* ============== Debug routes list ============== */
 app.get('/debug/routes', (_req, res) => {
   const routes = []
   app._router.stack.forEach((m) => {
@@ -163,18 +192,10 @@ app.get('/debug/routes', (_req, res) => {
   res.json({ ok:true, routes })
 })
 
-/* ============== JSON body for specific methods (unchanged behaviour) ============== */
-app.use((req, res, next) => {
-  const m = req.method
-  if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
-    return express.json({ limit: '2mb' })(req, res, next)
-  }
-  next()
-})
-
 /* ============== Home page (info) ============== */
-app.get('/', (_req, res) => {
+app.get('/', (req, res) => {
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
+  const origin = serverOrigin(req)
   res.type('html').send(`
     <html><body style="font-family:system-ui;padding:16px">
       <h2>Certify Verify Service</h2>
@@ -187,12 +208,12 @@ app.get('/', (_req, res) => {
       </ul>
       <p>Health: <a href="/health">/health</a></p>
       <p>Pesapal health: <a href="/pesapal/health?probe=1">/pesapal/health?probe=1</a></p>
-      <p><strong>Register IPN:</strong> <a href="/pesapal/registerIPN">/pesapal/registerIPN</a></p>
+      <p><strong>Register IPN:</strong> <a href="/pesapal/registerIPN">${origin}/pesapal/registerIPN</a></p>
     </body></html>
   `)
 })
 
-/* ============== Email link (passwordless) ============== */
+/* ============== Passwordless email sign-in link (optional) ============== */
 app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
@@ -203,62 +224,6 @@ app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (
     res.json({ ok:true, link })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.message || String(e) })
-  }
-})
-
-/* ============== Flutterwave verify (optional) ============== */
-const hasFlwSecret = !!FLW_SECRET
-async function verifyFlwAndActivate({ id, uid, tx_ref }) {
-  if (!id || !uid || !tx_ref) return { ok:false, status:400, error:'Missing id, uid or tx_ref' }
-  if (!hasFlwSecret)         return { ok:false, status:500, error:'Server missing FLW_SECRET' }
-  if (!db)                   return { ok:false, status:500, error:'Server missing Firebase credentials' }
-
-  const vr = await axios.get(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(id)}/verify`, {
-    headers: { Authorization: `Bearer ${FLW_SECRET}` }
-  })
-  const d = vr?.data?.data
-  if (!d) return { ok:false, status:400, error:'Invalid verify response' }
-
-  const statusOk   = d.status === 'successful'
-  const currencyOk = String(d.currency || '').toUpperCase() === 'USD'
-  const txRefOk    = String(d.tx_ref || '') === String(tx_ref)
-  if (!statusOk || !currencyOk || !txRefOk) {
-    return { ok:false, status:400, reason:'verify_failed', got:{ status:d.status, currency:d.currency, tx_ref:d.tx_ref } }
-  }
-
-  await db.collection('users').doc(String(uid)).set({
-    pro: true,
-    proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-    lastPayment: {
-      provider: 'flutterwave',
-      id: String(d.id),
-      tx_ref: d.tx_ref,
-      amount: d.amount,
-      currency: d.currency,
-      status: d.status,
-      customer: d.customer || null
-    }
-  }, { merge: true })
-
-  return { ok:true, uid, tx_ref, amount:d.amount, currency:d.currency }
-}
-app.post(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => {
-  try {
-    const out = await verifyFlwAndActivate(req.body || {})
-    if (!out.ok) return res.status(out.status || 500).json(out)
-    res.json(out)
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
-  }
-})
-app.get(['/verifyFlw','/api/verifyFlw','/admin/verifyFlw'], async (req, res) => {
-  try {
-    const { id, uid, tx_ref } = req.query || {}
-    const out = await verifyFlwAndActivate({ id, uid, tx_ref })
-    if (!out.ok) return res.status(out.status || 500).json(out)
-    res.json(out)
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
 
@@ -281,6 +246,8 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     if (!(await isManualProEnabled())) return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
     await db.collection('users').doc(uid).set({
       pro: true,
+      planId: 'pro_monthly',
+      proUntil: addInterval(Date.now(), 'month'),
       proSetAt: admin.firestore.FieldValue.serverTimestamp(),
       lastPayment: { provider: 'manual' }
     }, { merge: true })
@@ -293,7 +260,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
 /* ============== Admin rescue ============== */
 function requireAdmin(req, res) {
   if (!ADMIN_TOKEN) { res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' }); return false }
-  const token = req.headers['x-admin-token']
+  const token = req.headers['x-admin-token'] || req.headers['X-Admin-Token']
   if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
   return true
 }
@@ -301,10 +268,12 @@ app.post('/admin/setPro', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-    const { uid, pro = true, note = 'admin setPro' } = req.body || {}
+    const { uid, pro = true, planId = 'pro_monthly', interval = 'month', note = 'admin setPro' } = req.body || {}
     if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
     await db.collection('users').doc(String(uid)).set({
       pro: !!pro,
+      planId,
+      proUntil: !!pro ? addInterval(Date.now(), interval) : null,
       proSetAt: admin.firestore.FieldValue.serverTimestamp(),
       lastPayment: { provider:'admin', note }
     }, { merge: true })
@@ -314,9 +283,27 @@ app.post('/admin/setPro', async (req, res) => {
   }
 })
 
-/* ============== Pesapal order, token test & IPN ============== */
+/* ============== Pesapal: register IPN ============== */
+app.get('/pesapal/registerIPN', async (req, res) => {
+  try {
+    const { token, url } = await pesaToken()
+    const ipnUrl = `${serverOrigin(req)}/pesapal/ipn` // This server's IPN endpoint
+    const body = {
+      url: ipnUrl,
+      ipn_notification_type: 'GET' // or 'POST' if you prefer; we support both below
+    }
+    const { data } = await axios.post(
+      `${url}/api/URLSetup/RegisterIPN`,
+      body,
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
+    )
+    res.json({ ok:true, data })
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+  }
+})
 
-// Quick token test (GET)
+/* ============== Pesapal: token test ============== */
 app.get('/pesapal/tokenTest', async (_req, res) => {
   try {
     const { base } = await pesaToken()
@@ -326,42 +313,75 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
   }
 })
 
-// Create Order (POST)
-app.post('/pesapal/createOrder', async (req, res) => {
+/* ============== Pesapal: Subscribe (Monthly/Yearly) ============== */
+/**
+ * Client POST body:
+ *  { uid, planId: "pro_monthly" | "pro_yearly", email?, first_name?, last_name? }
+ * Response:
+ *  { ok: true, redirect_url, order_tracking_id, merchant_reference, baseUsed }
+ */
+app.post('/api/pesapal/subscribe', async (req, res) => {
   try {
-    const { token, base, url } = await pesaToken()
-    const { uid, amount = 15, currency = 'USD', email, first_name = '', last_name = '' } = req.body || {}
+    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+    const { uid, planId, email, first_name = '', last_name = '' } = req.body || {}
     if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
+    if (!planId || !AMOUNT_BY_PLAN[planId]) return res.status(400).json({ ok:false, error:'Unknown planId' })
     if (!PESA_IPN_ID) return res.status(500).json({ ok:false, error:'Server missing PESA_IPN_ID (register IPN first)' })
 
-    const merchantRef = `certify_${uid}_${Date.now()}`
-    const body = {
+    const amount = AMOUNT_BY_PLAN[planId]
+    const { token, base, url } = await pesaToken()
+
+    // Merchant reference encodes plan & uid for IPN decoding
+    const merchantRef = `sub_${planId}_${uid}_${Date.now()}`
+
+    const payload = {
       id: merchantRef,
-      currency,
+      currency: CURRENCY,
       amount: Number(amount),
-      description: 'Certify Pro (lifetime)',
-      callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade`,
+      description: `Certify ${planId.replace('_',' ').toUpperCase()}`,
+      callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade?ref=${encodeURIComponent(merchantRef)}`,
       notification_id: PESA_IPN_ID,
       billing_address: {
         email_address: email || 'guest@example.com',
         first_name,
         last_name,
-        country_code: 'UG'
+        country_code: 'UG' // OK to leave 'UG' for global; Pesapal uses it for address defaults
       }
     }
 
     const { data } = await axios.post(
       `${url}/api/Transactions/SubmitOrderRequest`,
-      body,
+      payload,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
-    res.json({ ok: true, baseUsed: base, ...data, merchant_reference: merchantRef })
+
+    // Persist order record for audit/idempotency
+    await db.collection('orders').doc(merchantRef).set({
+      type: 'subscription',
+      planId,
+      amount,
+      currency: CURRENCY,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      uid,
+      provider: 'pesapal',
+      orderTrackingId: data?.order_tracking_id || null,
+      base
+    }, { merge: true })
+
+    res.json({
+      ok: true,
+      baseUsed: base,
+      redirect_url: data?.redirect_url,
+      order_tracking_id: data?.order_tracking_id,
+      merchant_reference: merchantRef
+    })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
 
-// Manual status check (GET)
+/* ============== Pesapal: manual status check (optional) ============== */
 app.get('/pesapal/getStatus', async (req, res) => {
   try {
     const orderTrackingId = req.query.orderTrackingId
@@ -377,7 +397,8 @@ app.get('/pesapal/getStatus', async (req, res) => {
   }
 })
 
-// IPN handlers (GET/POST)
+/* ============== Pesapal: IPN (GET/POST) ============== */
+// Both GET and POST supported. Pesapal will send OrderTrackingId and we verify with GetTransactionStatus.
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
@@ -389,25 +410,52 @@ async function handlePesaNotification(params, res) {
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
     )
 
+    // Expect fields like payment_status_description, status_code, amount, currency, merchant_reference
     const mr = String(status?.merchant_reference || '')
-    const match = mr.match(/^certify_(.+?)_/)
-    const uid = match ? match[1] : null
+    // merchantRef pattern: sub_<planId>_<uid>_<ts>
+    const match = mr.match(/^sub_([^_]+)_(.+?)_\d+$/)
+    const planId = match ? match[1] : null
+    const uid    = match ? match[2] : null
 
-    if (uid && status?.status_code === 1 && db) {
+    const paid = Number(status?.status_code) === 1 // 1 = Completed
+    const amount = status?.amount
+    const currency = String(status?.currency || CURRENCY).toUpperCase()
+
+    if (paid && db && uid) {
+      // Infer plan if missing
+      const finalPlanId = planId || amountToPlanId(amount) || 'pro_monthly'
+      const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
+      const now = Date.now()
+      const proUntil = addInterval(now, interval)
+
       await db.collection('users').doc(uid).set({
         pro: true,
+        planId: finalPlanId,
+        proUntil,
         proSetAt: admin.firestore.FieldValue.serverTimestamp(),
         lastPayment: {
           provider: 'pesapal',
           orderTrackingId,
           merchant_reference: mr,
-          amount: status?.amount,
-          currency: status?.currency,
+          amount,
+          currency,
           status: status?.payment_status_description
         }
       }, { merge: true })
+
+      await db.collection('orders').doc(mr).set({
+        status: 'paid',
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        statusPayload: status
+      }, { merge: true })
+    } else {
+      await db?.collection('orders').doc(mr || orderTrackingId).set({
+        status: 'failed',
+        statusPayload: status
+      }, { merge: true }).catch(()=>{})
     }
 
+    // IPN acknowledgment format (per Pesapal docs)
     if (params?.OrderNotificationType === 'IPNCHANGE') {
       return res.json({
         orderNotificationType: 'IPNCHANGE',
