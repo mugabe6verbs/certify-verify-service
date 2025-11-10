@@ -23,10 +23,9 @@ const {
   // Pesapal
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
-  // 'demo' | 'live' | 'auto' (auto tries demo then live)
-  PESA_BASE = 'auto',
-  // If you already have an IPN ID from Pesapal dashboard, set this
-  PESA_IPN_ID
+  PESA_BASE = 'demo',  // 'demo' | 'live'
+  PESA_IPN_ID,
+
 } = process.env
 
 /* ============== Small helpers ============== */
@@ -61,8 +60,8 @@ try {
 }
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
-/* ============== Pricing (USD) ============== */
-const CURRENCY = 'USD'
+/* ============== Pricing (KES) ============== */
+const CURRENCY = process.env.PESA_CURRENCY || 'KES'
 const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
 function amountToPlanId(amount) {
@@ -487,3 +486,4 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
