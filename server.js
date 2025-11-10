@@ -313,14 +313,14 @@ app.get('/pesapal/tokenTest', async (_req, res) => {
   }
 })
 
-/* ============== Pesapal: Subscribe (Monthly/Yearly) ============== */
+/* ============== Pesapal: Subscribe handler (Monthly/Yearly) ============== */
 /**
  * Client POST body:
  *  { uid, planId: "pro_monthly" | "pro_yearly", email?, first_name?, last_name? }
  * Response:
  *  { ok: true, redirect_url, order_tracking_id, merchant_reference, baseUsed }
  */
-app.post('/api/pesapal/subscribe', async (req, res) => {
+async function subscribeHandler(req, res) {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
     const { uid, planId, email, first_name = '', last_name = '' } = req.body || {}
@@ -379,7 +379,11 @@ app.post('/api/pesapal/subscribe', async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
-})
+}
+
+// ✅ Register BOTH routes (alias keeps your existing frontend path working)
+app.post('/api/pesapal/subscribe', subscribeHandler)
+app.post('/pesapal/createOrder',   subscribeHandler)
 
 /* ============== Pesapal: manual status check (optional) ============== */
 app.get('/pesapal/getStatus', async (req, res) => {
