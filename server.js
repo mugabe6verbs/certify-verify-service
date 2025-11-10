@@ -63,15 +63,8 @@ const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 't
 
 /* ============== Pricing (USD) ============== */
 const CURRENCY = 'USD'
-// Keep amounts aligned with your UI (src/lib/pricing.js)
-const AMOUNT_BY_PLAN = {
-  pro_monthly: 19,
-  pro_yearly: 190
-}
-const INTERVAL_BY_PLAN = {
-  pro_monthly: 'month',
-  pro_yearly: 'year'
-}
+const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
+const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
 function amountToPlanId(amount) {
   const a = Number(amount)
   if (a === 19) return 'pro_monthly'
@@ -130,10 +123,9 @@ app.set('trust proxy', 1) // Render/Proxies
 // Prepare allow list for CORS (reused on homepage for display)
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 
-// CORS - apply globally BEFORE route registration so health endpoints include CORS headers
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin || allowList.includes(origin)) return cb(null, true) // allow server-to-server, curl, Postman
+    if (!origin || allowList.includes(origin)) return cb(null, true)
     return cb(new Error('Not allowed by CORS'))
   },
   methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
@@ -144,7 +136,7 @@ const corsOptions = {
 app.options('*', cors(corsOptions))
 app.use(cors(corsOptions))
 
-// Body parser only when needed to keep GET small
+// Body parser only when needed
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
@@ -287,11 +279,8 @@ app.post('/admin/setPro', async (req, res) => {
 app.get('/pesapal/registerIPN', async (req, res) => {
   try {
     const { token, url } = await pesaToken()
-    const ipnUrl = `${serverOrigin(req)}/pesapal/ipn` // This server's IPN endpoint
-    const body = {
-      url: ipnUrl,
-      ipn_notification_type: 'GET' // or 'POST' if you prefer; we support both below
-    }
+    const ipnUrl = `${serverOrigin(req)}/pesapal/ipn`
+    const body = { url: ipnUrl, ipn_notification_type: 'GET' }
     const { data } = await axios.post(
       `${url}/api/URLSetup/RegisterIPN`,
       body,
@@ -334,18 +323,20 @@ async function subscribeHandler(req, res) {
     // Merchant reference encodes plan & uid for IPN decoding
     const merchantRef = `sub_${planId}_${uid}_${Date.now()}`
 
+    // Include cancellation_url and robust callback
     const payload = {
       id: merchantRef,
       currency: CURRENCY,
       amount: Number(amount),
       description: `Certify ${planId.replace('_',' ').toUpperCase()}`,
       callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade?ref=${encodeURIComponent(merchantRef)}`,
+      cancellation_url: `${clean(PUBLIC_SITE_URL)}/upgrade?cancel=1`,
       notification_id: PESA_IPN_ID,
       billing_address: {
         email_address: email || 'guest@example.com',
         first_name,
         last_name,
-        country_code: 'UG' // OK to leave 'UG' for global; Pesapal uses it for address defaults
+        country_code: 'UG'
       }
     }
 
@@ -355,7 +346,25 @@ async function subscribeHandler(req, res) {
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
     )
 
-    // Persist order record for audit/idempotency
+    // Robustly pick the redirect target across possible shapes
+    const redirectUrl =
+      data?.redirect_url ||
+      data?.order_instructions?.redirect_url ||
+      data?.payment_url ||
+      null
+
+    if (!redirectUrl) {
+      return res.status(502).json({
+        ok: false,
+        error: 'Pesapal did not return redirect_url',
+        provider_echo: {
+          has_order_tracking_id: !!data?.order_tracking_id,
+          keys: Object.keys(data || {})
+        }
+      })
+    }
+
+    // Persist order record
     await db.collection('orders').doc(merchantRef).set({
       type: 'subscription',
       planId,
@@ -369,19 +378,20 @@ async function subscribeHandler(req, res) {
       base
     }, { merge: true })
 
-    res.json({
+    // Clean response for the client
+    return res.json({
       ok: true,
       baseUsed: base,
-      redirect_url: data?.redirect_url,
+      redirect_url: redirectUrl,
       order_tracking_id: data?.order_tracking_id,
       merchant_reference: merchantRef
     })
   } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+    return res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 }
 
-// ✅ Register BOTH routes (alias keeps your existing frontend path working)
+// Register BOTH routes (alias keeps your existing frontend path working)
 app.post('/api/pesapal/subscribe', subscribeHandler)
 app.post('/pesapal/createOrder',   subscribeHandler)
 
@@ -402,7 +412,6 @@ app.get('/pesapal/getStatus', async (req, res) => {
 })
 
 /* ============== Pesapal: IPN (GET/POST) ============== */
-// Both GET and POST supported. Pesapal will send OrderTrackingId and we verify with GetTransactionStatus.
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
@@ -414,19 +423,16 @@ async function handlePesaNotification(params, res) {
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
     )
 
-    // Expect fields like payment_status_description, status_code, amount, currency, merchant_reference
     const mr = String(status?.merchant_reference || '')
-    // merchantRef pattern: sub_<planId>_<uid>_<ts>
     const match = mr.match(/^sub_([^_]+)_(.+?)_\d+$/)
     const planId = match ? match[1] : null
     const uid    = match ? match[2] : null
 
-    const paid = Number(status?.status_code) === 1 // 1 = Completed
+    const paid = Number(status?.status_code) === 1
     const amount = status?.amount
     const currency = String(status?.currency || CURRENCY).toUpperCase()
 
     if (paid && db && uid) {
-      // Infer plan if missing
       const finalPlanId = planId || amountToPlanId(amount) || 'pro_monthly'
       const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
       const now = Date.now()
@@ -459,7 +465,6 @@ async function handlePesaNotification(params, res) {
       }, { merge: true }).catch(()=>{})
     }
 
-    // IPN acknowledgment format (per Pesapal docs)
     if (params?.OrderNotificationType === 'IPNCHANGE') {
       return res.json({
         orderNotificationType: 'IPNCHANGE',
