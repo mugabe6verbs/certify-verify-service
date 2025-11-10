@@ -60,7 +60,7 @@ try {
 }
 const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 'true'
 
-/* ============== Pricing (KES) ============== */
+/* ============== Pricing (USD) ============== */
 const CURRENCY = process.env.PESA_CURRENCY || 'KES'
 const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
@@ -486,4 +486,5 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
 
