@@ -3,6 +3,7 @@ import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
 import cors from 'cors'
+import dns from 'dns/promises'
 
 const {
   PORT = 8080,
@@ -492,8 +493,47 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', (req, res) => handlePesaNotification(req.body, res))
 
+
+/* ============== Org custom domain verification ============== */
+// GET /api/org/:orgId/verify-domain
+app.get('/api/org/:orgId/verify-domain', async (req, res) => {
+  try {
+    const { orgId } = req.params
+    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
+    
+    // Lookup org from Firestore
+    const orgSnap = await db.collection('orgs').doc(orgId).get()
+    if (!orgSnap.exists) return res.status(404).json({ ok:false, error:'Organization not found' })
+
+    const orgData = orgSnap.data()
+    const domain = orgData.customDomain
+    const expectedTarget = 'custom.certifyhq.com'  // <- replace with your actual target
+
+    if (!domain) return res.status(400).json({ ok:false, error:'No custom domain set for this org' })
+
+    // Attempt CNAME lookup
+    let verified = false
+    let cnames = []
+    try {
+      cnames = await dns.resolveCname(domain)
+      verified = cnames.includes(expectedTarget)
+    } catch (err) {
+      if (!['ENODATA','ENOTFOUND'].includes(err.code)) throw err
+      // else leave verified false
+    }
+
+    // Optionally update Firestore status
+    await db.collection('orgs').doc(orgId).set({ domainVerified: verified }, { merge: true })
+
+    res.json({ ok:true, domain, verified, cnames })
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e?.message || String(e) })
+  }
+})
+
 /* ============== Start ============== */
 app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
