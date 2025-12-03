@@ -469,7 +469,7 @@ app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.bo
 
 
 /* ============== Org custom domain verification (secured) ============== */
-import rateLimit from 'express-rate-limit'
+
 
 // Rate limiter: max 5 requests per minute per user
 const orgVerifyLimiter = rateLimit({
@@ -531,3 +531,4 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
