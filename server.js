@@ -476,7 +476,7 @@ const adminVerifyLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.post('/admin/verify', adminVerifyLimiter, async (req, res) => {
+app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
   try {
     const { idToken, password } = req.body || {};
     if (!idToken || !password) return res.status(400).json({ ok: false, error: 'Missing idToken or password' });
@@ -603,5 +603,6 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
 
 
