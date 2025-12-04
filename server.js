@@ -467,6 +467,78 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
 
+// === Admin verification endpoint (server-side admin password check) ===
+
+const adminVerifyLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,             // max 10 attempts per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.post('/admin/verify', adminVerifyLimiter, async (req, res) => {
+  try {
+    const { idToken, password } = req.body || {};
+    if (!idToken || !password) return res.status(400).json({ ok: false, error: 'Missing idToken or password' });
+
+    // Verify the firebase id token to get uid (ensures caller is who they say)
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(String(idToken));
+    } catch (err) {
+      return res.status(401).json({ ok: false, error: 'Invalid idToken' });
+    }
+    const uid = decoded.uid;
+
+    // Check server-side admin password (must be set in process.env.ADMIN_PASSWORD)
+    const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+    if (!ADMIN_PASSWORD) return res.status(500).json({ ok: false, error: 'Admin password not configured on server' });
+
+    // Constant-time comparison (safer than ===)
+    const safeEqual = (a = '', b = '') => {
+      const crypto = require('crypto');
+      const ab = Buffer.from(String(a));
+      const bb = Buffer.from(String(b));
+      if (ab.length !== bb.length) return false;
+      return crypto.timingSafeEqual(ab, bb);
+    };
+
+    if (!safeEqual(password, ADMIN_PASSWORD)) {
+      // Log failed attempt (do not store the raw password)
+      try {
+        await db?.collection('admin_audit').add({
+          uid,
+          action: 'verify_failed',
+          at: admin.firestore.FieldValue.serverTimestamp(),
+          ip: req.ip,
+          userAgent: req.headers['user-agent'] || null,
+        }).catch(()=>{});
+      } catch (e) { /* ignore audit write errors */ }
+
+      return res.status(403).json({ ok: false, error: 'Invalid password' });
+    }
+
+    // Set custom claim 'admin' for this user (idempotent if already set)
+    await admin.auth().setCustomUserClaims(uid, { admin: true });
+
+    // Persist audit log for success
+    try {
+      await db?.collection('admin_audit').add({
+        uid,
+        action: 'verify_success',
+        at: admin.firestore.FieldValue.serverTimestamp(),
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] || null,
+      }).catch(()=>{});
+    } catch (e) { /* ignore audit write errors */ }
+
+    return res.json({ ok: true, message: 'Verified; refresh token to pick up admin claim' });
+  } catch (e) {
+    console.error('admin/verify error', e);
+    return res.status(500).json({ ok:false, error: e?.message || String(e) });
+  }
+});
+
 
 /* ============== Org custom domain verification (secured) ============== */
 
@@ -531,4 +603,5 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
 
