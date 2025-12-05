@@ -467,6 +467,41 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
 
+/* ============== Admin Verification (frontend RequireAdmin.jsx) ============== */
+app.post('/api/admin/verify', async (req, res) => {
+  try {
+    const { idToken, password } = req.body || {};
+
+    if (!idToken || !password) {
+      return res.status(400).json({ ok: false, error: 'Missing idToken or password.' });
+    }
+
+    if (!process.env.ADMIN_PASSWORD) {
+      return res.status(500).json({ ok: false, error: 'Server missing ADMIN_PASSWORD' });
+    }
+
+    // Check your existing admin password (already stored in .env)
+    if (password !== process.env.ADMIN_PASSWORD) {
+      return res.status(403).json({ ok: false, error: 'Invalid admin password.' });
+    }
+
+    // Verify Firebase ID token
+    const decoded = await admin.auth().verifyIdToken(String(idToken));
+    const uid = decoded.uid;
+
+    // Set admin custom claim
+    await admin.auth().setCustomUserClaims(uid, { admin: true });
+
+    // Force token refresh on client
+    await admin.auth().revokeRefreshTokens(uid);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('ADMIN VERIFY ERROR:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Server error' });
+  }
+});
+
 
 /* ============== Org custom domain verification (secured) ============== */
 
@@ -531,4 +566,5 @@ app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
 })
+
 
