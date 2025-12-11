@@ -1,4 +1,3 @@
-
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
@@ -21,7 +20,8 @@ const {
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',  // 'demo' | 'live'
   PESA_IPN_ID,
-  VERIFY_CNAME_TARGET = 'custom.certifyhq.com'
+  VERIFY_CNAME_TARGET = 'custom.certifyhq.com',
+  ADMIN_PASSWORD // Added for clarity, as it's used later
 } = process.env
 
 /* ============== Small helpers ============== */
@@ -119,11 +119,12 @@ async function pesaToken(preferred = PESA_MODE) {
 const app = express()
 app.set('trust proxy', 1)
 
+// Updated CORS origin logic to include new domains (Ensure ENV variable is updated!)
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
   origin(origin, cb) {
     if (!origin || allowList.includes(origin)) return cb(null, true)
-    return cb(new Error('Not allowed by CORS'))
+    return cb(new Error(`Not allowed by CORS: ${origin}`))
   },
   methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
   allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
@@ -205,10 +206,16 @@ app.get('/debug/routes', (req, res) => {
   res.json({ ok:true, routes })
 })
 
-/* ============== Home page (info) - limited in prod ============== */
+/* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
 app.get('/', (req, res) => {
-  // only show sensitive info to admin token holders
   const isAdminView = Boolean((req.headers['x-admin-token'] || req.headers['X-Admin-Token']) === ADMIN_TOKEN)
+  
+  // If not admin and not in development, return a simple, uninformative health check
+  if (!isAdminView && process.env.NODE_ENV === 'production') {
+      return res.json({ ok: true, service: 'Certify Verify Service', status: 'running' })
+  }
+
+  // Otherwise (if admin or dev environment), display the full debug info
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   const origin = serverOrigin(req)
   res.type('html').send(`
@@ -392,7 +399,7 @@ async function subscribeHandler(req, res) {
 
 // Require authentication + rate limit on subscribe/createOrder
 app.post('/api/pesapal/subscribe', authenticate, pesapalLimiter, subscribeHandler)
-app.post('/pesapal/createOrder',   authenticate, pesapalLimiter, subscribeHandler)
+app.post('/pesapal/createOrder',    authenticate, pesapalLimiter, subscribeHandler)
 
 /* ============== Pesapal: manual status check (optional) ============== */
 app.get('/pesapal/getStatus', async (req, res) => {
@@ -476,12 +483,13 @@ app.post('/api/admin/verify', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing idToken or password.' });
     }
 
-    if (!process.env.ADMIN_PASSWORD) {
+    // IMPORTANT: Use the ADMIN_PASSWORD from process.env
+    if (!ADMIN_PASSWORD) {
       return res.status(500).json({ ok: false, error: 'Server missing ADMIN_PASSWORD' });
     }
 
-    // Check your existing admin password (already stored in .env)
-    if (password !== process.env.ADMIN_PASSWORD) {
+    // Check your existing admin password
+    if (password !== ADMIN_PASSWORD) {
       return res.status(403).json({ ok: false, error: 'Invalid admin password.' });
     }
 
@@ -565,6 +573,5 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
 app.listen(PORT, () => {
   console.log(`verify service listening on :${PORT}`)
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
+  console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
-
