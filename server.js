@@ -20,8 +20,8 @@ const {
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',  // 'demo' | 'live'
   PESA_IPN_ID,
-  VERIFY_CNAME_TARGET = 'custom.certifyhq.com',
-  ADMIN_PASSWORD // Added for clarity, as it's used later
+  VERIFY_CNAME_TARGET = 'custom.getcertifyhq.com',
+  ADMIN_PASSWORD 
 } = process.env
 
 /* ============== Small helpers ============== */
@@ -119,7 +119,7 @@ async function pesaToken(preferred = PESA_MODE) {
 const app = express()
 app.set('trust proxy', 1)
 
-// Updated CORS origin logic to include new domains (Ensure ENV variable is updated!)
+
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
   origin(origin, cb) {
@@ -136,7 +136,7 @@ app.use(cors(corsOptions))
 app.use(helmet())
 app.use(compression())
 
-// Global body-size limits on write methods (keeps your original approach)
+// Global body-size limits on write methods 
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
@@ -150,6 +150,14 @@ const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders
 const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
 const ipnLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false })
 app.use(globalLimiter)
+
+const adminVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,                  // 5 attempts per window
+  standardHeaders: true,
+  legacyHeaders: false
+})
+
 
 /* ============== Auth helpers ============== */
 async function authenticate(req, res, next) {
@@ -474,8 +482,9 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
 
-/* ============== Admin Verification (frontend RequireAdmin.jsx) ============== */
-app.post('/api/admin/verify', async (req, res) => {
+/* ============== Admin Verification ============== */
+app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
+
   try {
     const { idToken, password } = req.body || {};
 
@@ -551,17 +560,19 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
       if (!['ENODATA', 'ENOTFOUND'].includes(err.code)) throw err
     }
 
-    if (!verified) {
-      try {
-        const txts = await dns.resolveTxt(domain)
-        const flat = txts.flat().map(s => s.toString())
-        if (flat.some(s => s.includes('certify-verify='))) verified = true
-      } catch (e) {
-        // ignore TXT errors
-      }
-    }
+   if (!verified) {
+  try {
+    const txts = await dns.resolveTxt(domain)
+    const flat = txts.flat().map(s => s.toString().trim())
 
-    await db.collection('orgs').doc(orgId).set({ domainVerified: verified }, { merge: true })
+    const expected = `certify-verify=org:${orgId}`
+    if (flat.includes(expected)) verified = true
+  } catch (e) {
+    // ignore TXT errors
+  }
+}
+
+ await db.collection('orgs').doc(orgId).set({ domainVerified: verified }, { merge: true })
     res.json({ ok: true, domain, verified, cnames })
 
   } catch (e) {
@@ -575,3 +586,4 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
