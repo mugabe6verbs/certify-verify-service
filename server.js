@@ -370,8 +370,8 @@ async function subscribeHandler(req, res) {
       currency: CURRENCY,
       amount: Number(amount),
       description: `Certify ${planId.replace('_',' ').toUpperCase()}`,
-      callback_url: `${clean(PUBLIC_SITE_URL)}/upgrade?ref=${encodeURIComponent(merchantRef)}`,
-      cancellation_url: `${clean(PUBLIC_SITE_URL)}/upgrade?cancel=1`,
+      callback_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade?ref=${encodeURIComponent(merchantRef)}`,
+      cancellation_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade?cancel=1`,
       notification_id: PESA_IPN_ID,
       billing_address: {
         email: email || 'guest@example.com',
@@ -586,3 +586,4 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
