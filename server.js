@@ -275,12 +275,13 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     const uid = decoded.uid
     if (!(await isManualProEnabled())) return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
     await db.collection('users').doc(uid).set({
-      pro: true,
-      planId: 'pro_monthly',
-      proUntil: addInterval(Date.now(), 'month'),
-      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastPayment: { provider: 'manual' }
-    }, { merge: true })
+  pro: true,
+  planId: 'pro_monthly',
+  proExpiresAt: new Date(addInterval(Date.now(), 'month')),
+  proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+  lastPayment: { provider: 'manual' }
+}, { merge: true })
+
     res.json({ ok:true, uid })
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
@@ -304,7 +305,8 @@ app.post('/admin/setPro', (req, res) => {
       await db.collection('users').doc(String(uid)).set({
         pro: !!pro,
         planId,
-        proUntil: !!pro ? addInterval(Date.now(), interval) : null,
+        proExpiresAt: !!pro ? new Date(addInterval(Date.now(), interval)) : null,
+
         proSetAt: admin.firestore.FieldValue.serverTimestamp(),
         lastPayment: { provider:'admin', note }
       }, { merge: true })
@@ -470,7 +472,7 @@ async function handlePesaNotification(params, res) {
 
     const finalPlanId = planId || 'pro_monthly'
     const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
-    const proUntil = addInterval(Date.now(), interval)
+    const proExpiresAt = new Date(addInterval(Date.now(), interval))
 
     // ---------- MARK ORDER PAID FIRST ----------
     await orderRef.set(
@@ -483,21 +485,20 @@ async function handlePesaNotification(params, res) {
     )
 
     // ---------- GRANT PRO (ONCE) ----------
-    await db.collection('users').doc(uid).set(
-      {
-        pro: true,
-        planId: finalPlanId,
-        proUntil,
-        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastPayment: {
-          provider: 'pesapal',
-          orderTrackingId,
-          merchant_reference: merchantRef
-        }
-      },
-      { merge: true }
-    )
-
+   await db.collection('users').doc(uid).set(
+  {
+    pro: true,
+    planId: finalPlanId,
+    proExpiresAt,
+    proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastPayment: {
+      provider: 'pesapal',
+      orderTrackingId,
+      merchant_reference: merchantRef
+    }
+  },
+  { merge: true }
+)
     if (params?.OrderNotificationType === 'IPNCHANGE') {
       return res.json({
         orderNotificationType: 'IPNCHANGE',
@@ -625,5 +626,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
