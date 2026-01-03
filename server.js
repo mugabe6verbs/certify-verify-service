@@ -365,20 +365,21 @@ async function subscribeHandler(req, res) {
 
     const country_code = normalizeCountryCode(rawCountry)
 
-    const payload = {
-      id: merchantRef,
-      currency: CURRENCY,
-      amount: Number(amount),
-      description: `Certify ${planId.replace('_',' ').toUpperCase()}`,
-      callback_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade?ref=${encodeURIComponent(merchantRef)}`,
-      cancellation_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade?cancel=1`,
-      notification_id: PESA_IPN_ID,
-      billing_address: {
-        email: email || 'guest@example.com',
-        first_name,
-        last_name,
-        ...(country_code ? { country_code } : {})
-      }
+   const payload = {
+  id: merchantRef,
+  currency: CURRENCY,
+  amount: Number(amount),
+  description: `Certify ${planId.replace('_',' ').toUpperCase()}`,
+  callback_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade/success`,
+  cancellation_url: `${clean(PUBLIC_SITE_URL)}/app/upgrade/cancel`,
+  notification_id: PESA_IPN_ID,
+  billing_address: {
+    email: email || 'guest@example.com',
+    first_name,
+    last_name,
+    ...(country_code ? { country_code } : {})
+  }
+}
     }
 
     const { data } = await axios.post(
@@ -426,61 +427,99 @@ app.get('/pesapal/getStatus', async (req, res) => {
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
-    if (!orderTrackingId) return res.status(400).json({ ok:false, error:'Missing OrderTrackingId' })
+    if (!orderTrackingId) {
+      return res.status(400).json({ ok: false, error: 'Missing OrderTrackingId' })
+    }
 
     // Fetch status from Pesapal (server-to-server)
     const { token, url } = await pesaToken()
-    const { data: status } = await axios.get(`${url}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
+    const { data: status } = await axios.get(
+      `${url}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+    )
 
-    const mr = String(status?.merchant_reference || '')
-    const match = mr.match(/^sub_([^_]+)_(.+?)_\d+$/)
-    const planId = match ? match[1] : null
-    const uid    = match ? match[2] : null
-
+    const merchantRef = String(status?.merchant_reference || '')
     const paid = Number(status?.status_code) === 1
-    const amount = status?.amount
-    const currency = String(status?.currency || CURRENCY).toUpperCase()
 
-    // If paid and DB available, ensure we created the order and only then mark user pro
-    if (paid && db && uid && mr) {
-      // Verify the order doc exists (defensive)
-      const orderRef = db.collection('orders').doc(mr)
-      const orderSnap = await orderRef.get()
-      if (orderSnap.exists) {
-        const finalPlanId = planId || amountToPlanId(amount) || 'pro_monthly'
-        const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
-        const now = Date.now()
-        const proUntil = addInterval(now, interval)
-
-        await db.collection('users').doc(uid).set({
-          pro: true,
-          planId: finalPlanId,
-          proUntil,
-          proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-          lastPayment: { provider: 'pesapal', orderTrackingId, merchant_reference: mr, amount, currency, status: status?.payment_status_description }
-        }, { merge: true })
-
-        await orderRef.set({ status: 'paid', paidAt: admin.firestore.FieldValue.serverTimestamp(), statusPayload: status }, { merge: true })
-      } else {
-        // Unknown order — persist failed/unknown record but do not mark user pro
-        await db.collection('orders').doc(mr).set({ status: 'failed_unknown_order', statusPayload: status }, { merge: true }).catch(()=>{})
-      }
-    } else {
-      await db?.collection('orders').doc(mr || orderTrackingId).set({ status: 'failed', statusPayload: status }, { merge: true }).catch(()=>{})
+    if (!db || !merchantRef) {
+      return res.json({ ok: true })
     }
+
+    const orderRef = db.collection('orders').doc(merchantRef)
+    const orderSnap = await orderRef.get()
+
+    // ---------- IDEMPOTENCY CHECK ----------
+    if (orderSnap.exists && orderSnap.get('status') === 'paid') {
+      return res.json({ ok: true, alreadyProcessed: true })
+    }
+
+    // Payment not successful or unknown order
+    if (!paid || !orderSnap.exists) {
+      await orderRef.set(
+        { status: 'failed', statusPayload: status },
+        { merge: true }
+      ).catch(() => {})
+      return res.json({ ok: true })
+    }
+
+    // Read authoritative data from order document
+    const { uid, planId } = orderSnap.data()
+    if (!uid) {
+      return res.json({ ok: true })
+    }
+
+    const finalPlanId = planId || 'pro_monthly'
+    const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
+    const proUntil = addInterval(Date.now(), interval)
+
+    // ---------- MARK ORDER PAID FIRST ----------
+    await orderRef.set(
+      {
+        status: 'paid',
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        statusPayload: status
+      },
+      { merge: true }
+    )
+
+    // ---------- GRANT PRO (ONCE) ----------
+    await db.collection('users').doc(uid).set(
+      {
+        pro: true,
+        planId: finalPlanId,
+        proUntil,
+        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastPayment: {
+          provider: 'pesapal',
+          orderTrackingId,
+          merchant_reference: merchantRef
+        }
+      },
+      { merge: true }
+    )
 
     if (params?.OrderNotificationType === 'IPNCHANGE') {
-      return res.json({ orderNotificationType: 'IPNCHANGE', orderTrackingId, orderMerchantReference: status?.merchant_reference || '', status: 200 })
+      return res.json({
+        orderNotificationType: 'IPNCHANGE',
+        orderTrackingId,
+        orderMerchantReference: merchantRef,
+        status: 200
+      })
     }
-    return res.json({ ok:true, status })
+
+    return res.json({ ok: true })
   } catch (e) {
     const err = e?.response?.data || e?.message || String(e)
-    return res.status(500).json({ ok:false, error: err })
+    return res.status(500).json({ ok: false, error: err })
   }
 }
 
-app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
-app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
+app.get('/pesapal/ipn', ipnLimiter, (req, res) =>
+  handlePesaNotification(req.query, res)
+)
+app.post('/pesapal/ipn', ipnLimiter, (req, res) =>
+  handlePesaNotification(req.body, res)
+)
 
 /* ============== Admin Verification ============== */
 app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
@@ -586,4 +625,5 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
