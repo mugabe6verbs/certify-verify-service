@@ -122,24 +122,7 @@ const app = express()
 app.set('trust proxy', 1)
 
 /* ======================================================
-   🔥 HARD BYPASS — payment & gateway endpoints
-   (ALL methods)
-   MUST come before any CORS logic
-   ====================================================== */
-app.use('/pesapal/ipn', (req, res, next) => next())
-app.use('/pesapal/createOrder', (req, res, next) => next())
-app.use('/api/pesapal/subscribe', (req, res, next) => next())
-
-/* ======================================================
-   🔥 HARD BYPASS — OPTIONS for payment routes
-   (CRITICAL: fixes Pesapal redirect CORS)
-   ====================================================== */
-app.options('/pesapal/ipn', (_req, res) => res.sendStatus(204))
-app.options('/pesapal/createOrder', (_req, res) => res.sendStatus(204))
-app.options('/api/pesapal/subscribe', (_req, res) => res.sendStatus(204))
-
-/* ======================================================
-   🔒 Global CORS (SPA traffic only)
+   🔒 CORS CONFIG — single source of truth
    ====================================================== */
 const allowList = (ALLOW_ORIGINS || '')
   .split(',')
@@ -148,39 +131,39 @@ const allowList = (ALLOW_ORIGINS || '')
 
 const corsOptions = {
   origin(origin, cb) {
+    // Allow same-origin, server-to-server, and allowed frontends
     if (!origin || allowList.includes(origin)) return cb(null, true)
     return cb(new Error(`Not allowed by CORS: ${origin}`))
   },
-  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Admin-Token',
-    'x-admin-token'
-  ],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
   optionsSuccessStatus: 204,
 }
 
-app.use(cors(corsOptions))
+/* ======================================================
+   ✅ PAYMENT ROUTES — CORS ENABLED (not bypassed)
+   This is the KEY FIX
+   ====================================================== */
+app.use(
+  ['/pesapal/createOrder', '/api/pesapal/subscribe'],
+  cors(corsOptions)
+)
 
 /* ======================================================
-   Preflight handling (everything else)
+   🔥 IPN — NO CORS (server-to-server only)
    ====================================================== */
-app.options('*', cors(corsOptions))
+app.use('/pesapal/ipn', (req, _res, next) => next())
+
+/* ======================================================
+   🔒 Global CORS (SPA only)
+   ====================================================== */
+app.use(cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
 
-// Global body-size limits on write methods
-app.use((req, res, next) => {
-  const m = req.method
-  if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
-    return express.json({ limit: '2mb' })(req, res, next)
-  }
-  next()
-})
-
+app.use(express.json({ limit: '2mb' }))
 /* ============== Rate limiters ============== */
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
 const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
@@ -635,6 +618,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
