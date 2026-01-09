@@ -131,14 +131,19 @@ const corsOptions = {
 }
 app.options('*', cors(corsOptions))
 
-// 🔓 Allow Pesapal IPN (server-to-server, bypass strict CORS)
+// 🔓 Allow Pesapal IPN (server-to-server)
 app.use('/pesapal/ipn', cors())
+
+// 🔓 Allow order creation endpoints
+app.use('/pesapal/createOrder', cors())
+app.use('/api/pesapal/subscribe', cors())
 
 // 🔒 Strict CORS for everything else
 app.use(cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
+
 
 
 // Global body-size limits on write methods 
@@ -604,6 +609,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
