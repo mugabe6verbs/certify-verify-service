@@ -129,12 +129,17 @@ const corsOptions = {
   credentials: true,
   optionsSuccessStatus: 204
 }
+
 app.options('*', cors(corsOptions))
 
-// 🔓 Allow Pesapal IPN (server-to-server)
+// 🔓 Explicit OPTIONS for payment routes
+app.options('/pesapal/createOrder', cors())
+app.options('/api/pesapal/subscribe', cors())
+
+// 🔓 Allow Pesapal IPN
 app.use('/pesapal/ipn', cors())
 
-// 🔓 Allow order creation endpoints
+// 🔓 Allow payment creation endpoints
 app.use('/pesapal/createOrder', cors())
 app.use('/api/pesapal/subscribe', cors())
 
@@ -609,6 +614,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
