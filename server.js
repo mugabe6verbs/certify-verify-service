@@ -352,7 +352,14 @@ async function subscribeHandler(req, res) {
     // require authenticated user
     if (!req.user || !req.user.uid) return res.status(401).json({ ok:false, error:'Unauthorized' })
     const uid = req.user.uid
-
+    
+    // 🔒 HARD BLOCK: never allow anonymous users to create orders
+if (req.user.firebase?.sign_in_provider === 'anonymous') {
+  return res.status(403).json({
+    ok: false,
+    error: 'Anonymous users must sign in before upgrading',
+  })
+}
     const { planId, email, first_name = '', last_name = '', country_code: rawCountry } = req.body || {}
     if (!planId || !AMOUNT_BY_PLAN[planId]) return res.status(400).json({ ok:false, error:'Unknown planId' })
     if (!PESA_IPN_ID) return res.status(500).json({ ok:false, error:'Server missing PESA_IPN_ID (register IPN first)' })
@@ -586,5 +593,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
