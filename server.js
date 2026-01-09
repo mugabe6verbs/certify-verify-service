@@ -123,11 +123,20 @@ app.set('trust proxy', 1)
 
 /* ======================================================
    🔥 HARD BYPASS — payment & gateway endpoints
+   (ALL methods)
    MUST come before any CORS logic
    ====================================================== */
 app.use('/pesapal/ipn', (req, res, next) => next())
 app.use('/pesapal/createOrder', (req, res, next) => next())
 app.use('/api/pesapal/subscribe', (req, res, next) => next())
+
+/* ======================================================
+   🔥 HARD BYPASS — OPTIONS for payment routes
+   (CRITICAL: fixes Pesapal redirect CORS)
+   ====================================================== */
+app.options('/pesapal/ipn', (_req, res) => res.sendStatus(204))
+app.options('/pesapal/createOrder', (_req, res) => res.sendStatus(204))
+app.options('/api/pesapal/subscribe', (_req, res) => res.sendStatus(204))
 
 /* ======================================================
    🔒 Global CORS (SPA traffic only)
@@ -156,7 +165,7 @@ const corsOptions = {
 app.use(cors(corsOptions))
 
 /* ======================================================
-   Preflight handling
+   Preflight handling (everything else)
    ====================================================== */
 app.options('*', cors(corsOptions))
 
@@ -171,7 +180,6 @@ app.use((req, res, next) => {
   }
   next()
 })
-
 
 /* ============== Rate limiters ============== */
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
@@ -627,6 +635,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
