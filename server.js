@@ -134,20 +134,29 @@ const corsOptions = {
   credentials: true,
   optionsSuccessStatus: 204
 }
+app.set('trust proxy', 1)
 
+/* ======================================================
+   🔥 HARD BYPASS — payment endpoints ONLY
+   These must be BEFORE any global CORS middleware
+   ====================================================== */
+app.use('/pesapal/ipn', (req, res, next) => next())
+app.use('/pesapal/createOrder', (req, res, next) => next())
+app.use('/api/pesapal/subscribe', (req, res, next) => next())
+
+/* ======================================================
+   Preflight handling
+   ====================================================== */
 app.options('*', cors(corsOptions))
 
-// 🔓 Allow payment creation endpoints (browser → API)
-app.options('/pesapal/createOrder', cors())
-app.options('/api/pesapal/subscribe', cors())
-app.use('/pesapal/createOrder', cors())
-app.use('/api/pesapal/subscribe', cors())
-
-// 🔒 Strict browser CORS for everything else
+/* ======================================================
+   🔒 Global CORS for everything else
+   ====================================================== */
 app.use(cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
+
 
 // Global body-size limits on write methods 
 app.use((req, res, next) => {
@@ -612,6 +621,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
