@@ -357,7 +357,13 @@ async function subscribeHandler(req, res) {
     // require authenticated user
     if (!req.user || !req.user.uid) return res.status(401).json({ ok:false, error:'Unauthorized' })
     const uid = req.user.uid
-    
+    console.log("🟢 CREATE ORDER HIT", {
+      time: new Date().toISOString(),
+      uid,
+      provider: req.user.firebase?.sign_in_provider,
+      origin: req.headers.origin,
+      path: req.originalUrl,
+    })
     // 🔒 HARD BLOCK: never allow anonymous users to create orders
 if (req.user.firebase?.sign_in_provider === 'anonymous') {
   return res.status(403).json({
@@ -598,6 +604,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
