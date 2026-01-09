@@ -118,6 +118,11 @@ async function pesaToken(preferred = PESA_MODE) {
 /* ============== App / CORS / Middleware ============== */
 const app = express()
 app.set('trust proxy', 1)
+// 🔥 HARD BYPASS: Pesapal IPN (server-to-server, NO CORS EVER)
+app.use('/pesapal/ipn', (req, res, next) => {
+  next()
+})
+
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
   origin(origin, cb) {
@@ -132,24 +137,17 @@ const corsOptions = {
 
 app.options('*', cors(corsOptions))
 
-// 🔓 Explicit OPTIONS for payment routes
+// 🔓 Allow payment creation endpoints (browser → API)
 app.options('/pesapal/createOrder', cors())
 app.options('/api/pesapal/subscribe', cors())
-
-// 🔓 Allow Pesapal IPN
-app.use('/pesapal/ipn', cors())
-
-// 🔓 Allow payment creation endpoints
 app.use('/pesapal/createOrder', cors())
 app.use('/api/pesapal/subscribe', cors())
 
-// 🔒 Strict CORS for everything else
+// 🔒 Strict browser CORS for everything else
 app.use(cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
-
-
 
 // Global body-size limits on write methods 
 app.use((req, res, next) => {
@@ -614,6 +612,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
