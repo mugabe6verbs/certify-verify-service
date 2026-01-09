@@ -117,23 +117,8 @@ async function pesaToken(preferred = PESA_MODE) {
 
 /* ============== App / CORS / Middleware ============== */
 const app = express()
-app.set('trust proxy', 1)
-// 🔥 HARD BYPASS: Pesapal IPN (server-to-server, NO CORS EVER)
-app.use('/pesapal/ipn', (req, res, next) => {
-  next()
-})
 
-const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
-const corsOptions = {
-  origin(origin, cb) {
-    if (!origin || allowList.includes(origin)) return cb(null, true)
-    return cb(new Error(`Not allowed by CORS: ${origin}`))
-  },
-  methods: ['GET','POST','OPTIONS','PUT','PATCH','DELETE'],
-  allowedHeaders: ['Content-Type','Authorization','X-Admin-Token','x-admin-token'],
-  credentials: true,
-  optionsSuccessStatus: 204
-}
+// Trust proxy (Render / Cloudflare / Load balancers)
 app.set('trust proxy', 1)
 
 /* ======================================================
@@ -147,17 +132,38 @@ app.use('/api/pesapal/subscribe', (req, res, next) => next())
 /* ======================================================
    🔒 Global CORS (SPA traffic only)
    ====================================================== */
+const allowList = (ALLOW_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+
+const corsOptions = {
+  origin(origin, cb) {
+    if (!origin || allowList.includes(origin)) return cb(null, true)
+    return cb(new Error(`Not allowed by CORS: ${origin}`))
+  },
+  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Admin-Token',
+    'x-admin-token'
+  ],
+  credentials: true,
+  optionsSuccessStatus: 204,
+}
+
 app.use(cors(corsOptions))
 
 /* ======================================================
-   Preflight handling (after bypass)
+   Preflight handling
    ====================================================== */
 app.options('*', cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
 
-// Global body-size limits on write methods 
+// Global body-size limits on write methods
 app.use((req, res, next) => {
   const m = req.method
   if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
@@ -165,6 +171,7 @@ app.use((req, res, next) => {
   }
   next()
 })
+
 
 /* ============== Rate limiters ============== */
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
@@ -620,6 +627,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
