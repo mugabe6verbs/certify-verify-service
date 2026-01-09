@@ -118,8 +118,6 @@ async function pesaToken(preferred = PESA_MODE) {
 /* ============== App / CORS / Middleware ============== */
 const app = express()
 app.set('trust proxy', 1)
-
-
 const allowList = (ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 const corsOptions = {
   origin(origin, cb) {
@@ -132,9 +130,16 @@ const corsOptions = {
   optionsSuccessStatus: 204
 }
 app.options('*', cors(corsOptions))
+
+// 🔓 Allow Pesapal IPN (server-to-server, bypass strict CORS)
+app.use('/pesapal/ipn', cors())
+
+// 🔒 Strict CORS for everything else
 app.use(cors(corsOptions))
+
 app.use(helmet())
 app.use(compression())
+
 
 // Global body-size limits on write methods 
 app.use((req, res, next) => {
@@ -593,6 +598,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
