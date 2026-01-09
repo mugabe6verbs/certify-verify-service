@@ -122,7 +122,7 @@ const app = express()
 app.set('trust proxy', 1)
 
 /* ======================================================
-   🔒 CORS CONFIG — single source of truth
+   🔒 CORS — SAFE, NON-BLOCKING
    ====================================================== */
 const allowList = (ALLOW_ORIGINS || '')
   .split(',')
@@ -131,39 +131,31 @@ const allowList = (ALLOW_ORIGINS || '')
 
 const corsOptions = {
   origin(origin, cb) {
-    // Allow same-origin, server-to-server, and allowed frontends
-    if (!origin || allowList.includes(origin)) return cb(null, true)
-    return cb(new Error(`Not allowed by CORS: ${origin}`))
+    // ✅ Allow browser SPA requests
+    if (!origin) return cb(null, true) // server-to-server, redirects
+    if (allowList.includes(origin)) return cb(null, true)
+
+    // 🚫 DO NOT THROW — silently ignore
+    return cb(null, false)
   },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Admin-Token',
+    'x-admin-token',
+  ],
   credentials: true,
   optionsSuccessStatus: 204,
 }
 
-/* ======================================================
-   ✅ PAYMENT ROUTES — CORS ENABLED (not bypassed)
-   This is the KEY FIX
-   ====================================================== */
-app.use(
-  ['/pesapal/createOrder', '/api/pesapal/subscribe'],
-  cors(corsOptions)
-)
-
-/* ======================================================
-   🔥 IPN — NO CORS (server-to-server only)
-   ====================================================== */
-app.use('/pesapal/ipn', (req, _res, next) => next())
-
-/* ======================================================
-   🔒 Global CORS (SPA only)
-   ====================================================== */
 app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 
 app.use(helmet())
 app.use(compression())
-
 app.use(express.json({ limit: '2mb' }))
+
 /* ============== Rate limiters ============== */
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
 const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
