@@ -305,23 +305,67 @@ function requireAdmin(req, res) {
   if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
   return true
 }
+async function logAdminAction({ action, adminUid, targetUid, meta = {} }) {
+  if (!db) return
+
+  await db.collection("admin_logs").add({
+    action,
+    adminUid,
+    targetUid,
+    meta,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  })
+}
 app.post('/admin/setPro', (req, res) => {
   if (!requireAdmin(req, res)) return
-  ;(async() => {
+
+  ;(async () => {
     try {
-      if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-      const { uid, pro = true, planId = 'pro_monthly', interval = 'month', note = 'admin setPro' } = req.body || {}
-      if (!uid) return res.status(400).json({ ok:false, error:'Missing uid' })
-      await db.collection('users').doc(String(uid)).set({
-        pro: !!pro,
-        planId,
-        proUntil: !!pro ? addInterval(Date.now(), interval) : null,
-        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastPayment: { provider:'admin', note }
-      }, { merge: true })
-      res.json({ ok:true, uid:String(uid), pro:!!pro })
+      if (!db) {
+        return res.status(500).json({
+          ok: false,
+          error: 'Server missing Firebase credentials',
+        })
+      }
+
+      const {
+        uid,
+        pro = true,
+        planId = 'pro_monthly',
+        interval = 'month',
+        note = 'admin setPro',
+      } = req.body || {}
+
+      if (!uid) {
+        return res.status(400).json({ ok: false, error: 'Missing uid' })
+      }
+
+      // 🔹 Update user subscription
+      await db.collection('users').doc(String(uid)).set(
+        {
+          pro: !!pro,
+          planId,
+          proUntil: !!pro ? addInterval(Date.now(), interval) : null,
+          proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastPayment: { provider: 'admin', note },
+        },
+        { merge: true }
+      )
+
+      // 🔍 AUDIT LOG (immutable)
+      await logAdminAction({
+        action: 'set_pro',
+        adminUid: 'admin-token', // token-based admin
+        targetUid: String(uid),
+        meta: { pro: !!pro, planId, interval, note },
+      })
+
+      res.json({ ok: true, uid: String(uid), pro: !!pro })
     } catch (e) {
-      res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+      res.status(500).json({
+        ok: false,
+        error: e?.response?.data || e?.message || String(e),
+      })
     }
   })()
 })
@@ -610,6 +654,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
