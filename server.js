@@ -15,7 +15,7 @@ const {
   ALLOW_ORIGINS = 'http://localhost:5173,https://certificate-generator-345be.web.app,https://certificate-generator-345be.firebaseapp.com,https://certify-verify-service-2.onrender.com',
   PUBLIC_SITE_URL = 'https://certificate-generator-345be.web.app',
   ALLOW_MANUAL_PRO,
-  ADMIN_TOKEN,
+  
   PESA_CONSUMER_KEY,
   PESA_CONSUMER_SECRET,
   PESA_BASE = 'demo',  // 'demo' | 'live'
@@ -118,12 +118,9 @@ async function pesaToken(preferred = PESA_MODE) {
 /* ============== App / CORS / Middleware ============== */
 const app = express()
 
-// Trust proxy (Render / Cloudflare / Load balancers)
+
 app.set('trust proxy', 1)
 
-/* ======================================================
-   🔒 CORS — SAFE, NON-BLOCKING
-   ====================================================== */
 const allowList = (ALLOW_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
@@ -131,19 +128,18 @@ const allowList = (ALLOW_ORIGINS || '')
 
 const corsOptions = {
   origin(origin, cb) {
-    // ✅ Allow browser SPA requests
+    
     if (!origin) return cb(null, true) // server-to-server, redirects
     if (allowList.includes(origin)) return cb(null, true)
 
-    // 🚫 DO NOT THROW — silently ignore
+    
     return cb(null, false)
   },
   methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
-    'X-Admin-Token',
-    'x-admin-token',
+    
   ],
   credentials: true,
   optionsSuccessStatus: 204,
@@ -169,27 +165,22 @@ const adminVerifyLimiter = rateLimit({
   legacyHeaders: false
 })
 
-
-/* ============== Auth helpers ============== */
+    
+/* ======================================================
+   AUTH
+====================================================== */
 async function authenticate(req, res, next) {
   try {
-    const authHeader = (req.headers.authorization || '').toString()
-    if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ ok:false, error:'Missing Bearer token' })
-    const idToken = authHeader.split('Bearer ')[1]
-    const decoded = await admin.auth().verifyIdToken(String(idToken), true)
-    req.user = decoded
-    return next()
-  } catch (err) {
-    console.warn('authenticate error', err?.message || err)
-    return res.status(401).json({ ok:false, error:'Invalid auth token' })
-  }
-}
+    const auth = req.headers.authorization || ""
+    if (!auth.startsWith("Bearer ")) {
+      return res.status(401).json({ ok: false, error: "Missing Bearer token" })
+    }
 
-function requireAdminToken(req, res) {
-  if (!ADMIN_TOKEN) { res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' }); return false }
-  const token = req.headers['x-admin-token'] || req.headers['X-Admin-Token']
-  if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
-  return true
+    req.user = await admin.auth().verifyIdToken(auth.slice(7), true)
+    next()
+  } catch {
+    res.status(401).json({ ok: false, error: "Invalid or expired token" })
+  }
 }
 
 /* ============== Health & Debug (protected) ============== */
@@ -211,27 +202,12 @@ app.get('/pesapal/health', async (req, res) => {
   }
 })
 
-app.get('/debug/routes', (req, res) => {
-  if (!requireAdminToken(req, res)) return
-  const routes = []
-  app._router.stack.forEach((m) => {
-    if (m.route && m.route.path) routes.push({ methods: Object.keys(m.route.methods), path: m.route.path })
-    else if (m.name === 'router' && m.handle?.stack) {
-      m.handle.stack.forEach((h) => {
-        if (h.route && h.route.path) routes.push({ methods: Object.keys(h.route.methods), path: h.route.path })
-      })
-    }
-  })
-  res.json({ ok:true, routes })
-})
+
 
 /* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
 app.get('/', (req, res) => {
-  const isAdminView = Boolean((req.headers['x-admin-token'] || req.headers['X-Admin-Token']) === ADMIN_TOKEN)
-  
-  // If not admin and not in development, return a simple, uninformative health check
-  if (!isAdminView && process.env.NODE_ENV === 'production') {
-      return res.json({ ok: true, service: 'Certify Verify Service', status: 'running' })
+  if (process.env.NODE_ENV === 'production') {
+    return res.json({ ok: true, service: 'Certify Verify Service', status: 'running' })
   }
 
   // Otherwise (if admin or dev environment), display the full debug info
@@ -246,7 +222,8 @@ app.get('/', (req, res) => {
         <li>Allowed origins: ${allowList.map(o=>`<code>${o}</code>`).join(', ') || '—'}</li>
         <li>Pesapal configuredBase: <code>${PESA_MODE}</code></li>
       </ul>
-      ${isAdminView ? `<p>Service account: <code>${maskedSA || '—'}</code></p>` : '<p>(sensitive info hidden)</p>'}
+      <p>(sensitive info hidden)</p>
+
       <p>Health: <a href="/health">/health</a></p>
       <p>Pesapal health: <a href="/pesapal/health?probe=1">/pesapal/health?probe=1</a></p>
       <p><strong>Register IPN (admin only):</strong> <code>GET ${origin}/pesapal/registerIPN</code></p>
@@ -254,19 +231,6 @@ app.get('/', (req, res) => {
   `)
 })
 
-/* ============== Passwordless email sign-in link (optional) ============== */
-app.post(['/makeEmailLink','/api/makeEmailLink','/admin/makeEmailLink'], async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
-    const { email } = req.body || {}
-    if (!email) return res.status(400).json({ ok:false, error:'Missing email' })
-    const actionCodeSettings = { url: `${clean(PUBLIC_SITE_URL)}/finish-signin`, handleCodeInApp: true }
-    const link = await admin.auth().generateSignInWithEmailLink(String(email), actionCodeSettings)
-    res.json({ ok:true, link })
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.message || String(e) })
-  }
-})
 
 /* ============== Manual Pro (dev/test) ============== */
 async function isManualProEnabled() {
@@ -299,96 +263,142 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
 })
 
 /* ============== Admin rescue ============== */
-function requireAdmin(req, res) {
-  if (!ADMIN_TOKEN) { res.status(500).json({ ok:false, error:'Server missing ADMIN_TOKEN' }); return false }
-  const token = req.headers['x-admin-token'] || req.headers['X-Admin-Token']
-  if (!token || token !== ADMIN_TOKEN) { res.status(403).json({ ok:false, error:'Forbidden (admin token)' }); return false }
-  return true
+
+
+async function requireAdminAuth(req, res) {
+  try {
+    const authHeader = (req.headers.authorization || "").toString()
+
+    if (!authHeader.startsWith("Bearer ")) {
+      res.status(401).json({ ok: false, error: "Missing Bearer token" })
+      return null
+    }
+
+    const idToken = authHeader.replace("Bearer ", "")
+    const decoded = await admin.auth().verifyIdToken(idToken, true)
+
+    if (decoded.admin !== true) {
+      res.status(403).json({ ok: false, error: "Admin access required" })
+      return null
+    }
+
+    return decoded // uid, email, claims
+  } catch (err) {
+    console.error("requireAdminAuth error:", err?.message || err)
+    res.status(401).json({ ok: false, error: "Invalid or expired token" })
+    return null
+  }
 }
-async function logAdminAction({ action, adminUid, targetUid, meta = {} }) {
-  if (!db) return
+ /* ============== Admin: set Pro ============== */
+app.post("/admin/setPro", async (req, res) => {
+  const adminUser = await requireAdminAuth(req, res)
+  if (!adminUser) return
 
-  await db.collection("admin_logs").add({
-    action,
-    adminUid,
-    targetUid,
-    meta,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  })
-}
-app.post('/admin/setPro', (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  ;(async () => {
-    try {
-      if (!db) {
-        return res.status(500).json({
-          ok: false,
-          error: 'Server missing Firebase credentials',
-        })
-      }
-
-      const {
-        uid,
-        pro = true,
-        planId = 'pro_monthly',
-        interval = 'month',
-        note = 'admin setPro',
-      } = req.body || {}
-
-      if (!uid) {
-        return res.status(400).json({ ok: false, error: 'Missing uid' })
-      }
-
-      // 🔹 Update user subscription
-      await db.collection('users').doc(String(uid)).set(
-        {
-          pro: !!pro,
-          planId,
-          proUntil: !!pro ? addInterval(Date.now(), interval) : null,
-          proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-          lastPayment: { provider: 'admin', note },
-        },
-        { merge: true }
-      )
-
-      // 🔍 AUDIT LOG (immutable)
-      await logAdminAction({
-        action: 'set_pro',
-        adminUid: 'admin-token', // token-based admin
-        targetUid: String(uid),
-        meta: { pro: !!pro, planId, interval, note },
-      })
-
-      res.json({ ok: true, uid: String(uid), pro: !!pro })
-    } catch (e) {
-      res.status(500).json({
+  try {
+    if (!db) {
+      return res.status(500).json({
         ok: false,
-        error: e?.response?.data || e?.message || String(e),
+        error: "Server missing Firebase credentials",
       })
     }
-  })()
+
+    const {
+      uid,
+      pro = true,
+      planId = "pro_monthly",
+      interval = "month",
+      note = "manual admin activation",
+    } = req.body || {}
+
+    if (!uid) {
+      return res.status(400).json({ ok: false, error: "Missing uid" })
+    }
+
+    // 🔹 Update user subscription
+    await db.collection("users").doc(String(uid)).set(
+      {
+        pro: !!pro,
+        planId,
+        proUntil: !!pro ? addInterval(Date.now(), interval) : null,
+        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastPayment: {
+          provider: "admin",
+          note,
+        },
+      },
+      { merge: true }
+    )
+
+    // 🔍 AUDIT LOG (immutable, attributed)
+    await logAdminAction({
+      action: "set_pro",
+      adminUid: adminUser.uid,
+      targetUid: String(uid),
+      meta: {
+        pro: !!pro,
+        planId,
+        interval,
+        note,
+      },
+    })
+
+    return res.json({
+      ok: true,
+      uid: String(uid),
+      pro: !!pro,
+    })
+  } catch (e) {
+    console.error("admin/setPro error:", e)
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || "Server error",
+    })
+  }
 })
 
 /* ============== Pesapal: register IPN (ADMIN ONLY) ============== */
-app.get('/pesapal/registerIPN', (req, res) => {
-  if (!requireAdmin(req, res)) return
-  ;(async () => {
-    try {
-      const { token, url } = await pesaToken()
-      const ipnUrl = `${serverOrigin(req)}/pesapal/ipn`
-      const body = { url: ipnUrl, ipn_notification_type: 'GET' }
-      const { data } = await axios.post(
-        `${url}/api/URLSetup/RegisterIPN`,
-        body,
-        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
-      )
-      res.json({ ok:true, data })
-    } catch (e) {
-      res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
+app.get('/pesapal/registerIPN', async (req, res) => {
+  const adminUser = await requireAdminAuth(req, res)
+  if (!adminUser) return
+
+  try {
+    const { token, url } = await pesaToken()
+    const ipnUrl = `${serverOrigin(req)}/pesapal/ipn`
+
+    const body = {
+      url: ipnUrl,
+      ipn_notification_type: 'GET',
     }
-  })()
+
+    const { data } = await axios.post(
+      `${url}/api/URLSetup/RegisterIPN`,
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      }
+    )
+
+    // Optional audit log (recommended)
+    await logAdminAction({
+      action: 'register_ipn',
+      adminUid: adminUser.uid,
+      targetUid: null,
+      meta: { ipnUrl },
+    })
+
+    return res.json({ ok: true, data })
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: e?.response?.data || e?.message || String(e),
+    })
+  }
 })
+
 
 /* ============== Pesapal: token test ============== */
 app.get('/pesapal/tokenTest', async (_req, res) => {
@@ -550,43 +560,20 @@ async function handlePesaNotification(params, res) {
 app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
 
-/* ============== Admin Verification ============== */
+/* ============== Admin Verification (break-glass) ============== */
 app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
 
-  try {
-    const { idToken, password } = req.body || {};
-
-    if (!idToken || !password) {
-      return res.status(400).json({ ok: false, error: 'Missing idToken or password.' });
-    }
-
-    // IMPORTANT: Use the ADMIN_PASSWORD from process.env
-    if (!ADMIN_PASSWORD) {
-      return res.status(500).json({ ok: false, error: 'Server missing ADMIN_PASSWORD' });
-    }
-
-    // Check your existing admin password
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(403).json({ ok: false, error: 'Invalid admin password.' });
-    }
-
-    // Verify Firebase ID token
-    const decoded = await admin.auth().verifyIdToken(String(idToken));
-    const uid = decoded.uid;
-
-    // Set admin custom claim
-    await admin.auth().setCustomUserClaims(uid, { admin: true });
-
-    // Force token refresh on client
-    await admin.auth().revokeRefreshTokens(uid);
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('ADMIN VERIFY ERROR:', err);
-    return res.status(500).json({ ok: false, error: err?.message || 'Server error' });
+  const { idToken, password } = req.body || {}
+  if (!idToken || password !== ADMIN_PASSWORD) {
+    return res.status(403).json({ ok: false })
   }
-});
 
+  const decoded = await admin.auth().verifyIdToken(idToken)
+  await admin.auth().setCustomUserClaims(decoded.uid, { admin: true })
+  await admin.auth().revokeRefreshTokens(decoded.uid)
+
+  res.json({ ok: true })
+})
 
 /* ============== Org custom domain verification (secured) ============== */
 
@@ -654,7 +641,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
 
 
 
