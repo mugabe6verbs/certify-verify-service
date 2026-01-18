@@ -78,6 +78,64 @@ function addInterval(ms, interval) {
   return d.getTime()
 }
 
+/* ============== Billing Reconcile Helper ============== */
+async function reconcileForUser(uid) {
+  if (!db) throw new Error("DB not available")
+
+  // Find latest paid subscription order
+  const snap = await db
+    .collection("orders")
+    .where("uid", "==", uid)
+    .where("status", "==", "paid")
+    .orderBy("paidAt", "desc")
+    .limit(1)
+    .get()
+
+  if (snap.empty) {
+    return { ok: true, reconciled: false, reason: "no_paid_orders" }
+  }
+
+  const orderDoc = snap.docs[0]
+  const order = orderDoc.data()
+
+  const finalPlanId =
+    order.planId || amountToPlanId(order.amount) || "pro_monthly"
+
+  const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
+  const proUntil = addInterval(Date.now(), interval)
+
+  const userRef = db.collection("users").doc(uid)
+  const userSnap = await userRef.get()
+
+  if (!userSnap.exists) {
+    return { ok: false, reconciled: false, reason: "user_missing" }
+  }
+
+  // Idempotent upgrade (safe to run multiple times)
+  await userRef.set(
+    {
+      pro: true,
+      planId: finalPlanId,
+      proUntil,
+      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastPayment: {
+        provider: order.provider || "pesapal",
+        orderId: orderDoc.id,
+        reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    },
+    { merge: true }
+  )
+
+  return {
+    ok: true,
+    reconciled: true,
+    planId: finalPlanId,
+    orderId: orderDoc.id,
+  }
+}
+
+
 /* ============== Pesapal config ============== */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
 const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
@@ -490,64 +548,18 @@ app.post('/pesapal/createOrder',    authenticate, pesapalLimiter, subscribeHandl
 /* ============== Billing Reconcile (Authenticated) ============== */
 app.post("/api/billing/reconcile", authenticate, async (req, res) => {
   try {
-    if (!db) {
-      return res.status(500).json({ ok: false, error: "Server missing Firebase credentials" })
-    }
-
     const uid = req.user?.uid
     if (!uid) {
       return res.status(401).json({ ok: false, error: "Unauthorized" })
     }
 
-    const userRef = db.collection("users").doc(uid)
-    const userSnap = await userRef.get()
-
-    if (!userSnap.exists) {
-      return res.status(404).json({ ok: false, error: "User profile missing" })
-    }
-
-    // Find latest PAID subscription order for this user
-    const ordersSnap = await db
-      .collection("orders")
-      .where("uid", "==", uid)
-      .where("status", "==", "paid")
-      .orderBy("paidAt", "desc")
-      .limit(1)
-      .get()
-
-    if (ordersSnap.empty) {
-      return res.json({ ok: true, reconciled: false, reason: "No paid orders" })
-    }
-
-    const order = ordersSnap.docs[0].data()
-
-    const finalPlanId = order.planId || "pro_monthly"
-    const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-    const now = Date.now()
-    const proUntil = addInterval(now, interval)
-
-    // Apply entitlement (idempotent)
-    await userRef.set(
-      {
-        pro: true,
-        planId: finalPlanId,
-        proUntil,
-        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastPayment: {
-          provider: order.provider || "pesapal",
-          orderTrackingId: order.orderTrackingId || null,
-          reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-      },
-      { merge: true }
-    )
-
-    return res.json({
-      ok: true,
-      reconciled: true,
-      planId: finalPlanId,
-      proUntil,
+    console.log("🧾 RECONCILE HIT", {
+      uid,
+      time: new Date().toISOString(),
     })
+
+    const result = await reconcileForUser(uid)
+    return res.json(result)
   } catch (e) {
     console.error("billing/reconcile error:", e)
     return res.status(500).json({
@@ -556,6 +568,7 @@ app.post("/api/billing/reconcile", authenticate, async (req, res) => {
     })
   }
 })
+
 
 /* ============== Pesapal: manual status check (optional) ============== */
 app.get('/pesapal/getStatus', async (req, res) => {
