@@ -499,7 +499,6 @@ app.get('/pesapal/getStatus', async (req, res) => {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-
 /* ============== Pesapal: IPN (GET/POST) ============== */
 async function handlePesaNotification(params, res) {
   try {
@@ -526,33 +525,38 @@ async function handlePesaNotification(params, res) {
     const amount = status?.amount
     const currency = String(status?.currency || CURRENCY).toUpperCase()
 
-    // If paid and DB available, ensure we created the order and only then mark user pro
+    // Only proceed if paid and server is healthy
     if (paid && db && uid && mr) {
-      // Verify the order doc exists (defensive)
       const orderRef = db.collection("orders").doc(mr)
       const orderSnap = await orderRef.get()
 
-      if (orderSnap.exists) {
+      if (!orderSnap.exists) {
+        // Unknown order — persist record but do not upgrade user
+        await db
+          .collection("orders")
+          .doc(mr)
+          .set({ status: "failed_unknown_order", statusPayload: status }, { merge: true })
+          .catch(() => {})
+      } else {
         const userRef = db.collection("users").doc(uid)
         const userSnap = await userRef.get()
 
-        // 🔒 HARD RULE: Payments must NEVER create users
+        // ⚠ If user profile doesn't exist yet, create a minimal one (race-proof)
         if (!userSnap.exists) {
-          console.error("🚨 Paid order for missing user profile:", uid)
+          console.warn("⚠ Creating minimal user profile for paid order:", uid)
 
-          await orderRef.set(
+          await userRef.set(
             {
-              status: "paid_user_missing",
-              paidAt: admin.firestore.FieldValue.serverTimestamp(),
-              statusPayload: status,
+              uid,
+              email: status?.billing_address?.email || null,
+              planId: "free",
+              pro: false,
+              systemCreated: true,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             },
             { merge: true }
           )
-
-          return res.json({
-            ok: false,
-            error: "User profile missing — cannot activate Pro",
-          })
         }
 
         const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
@@ -560,6 +564,7 @@ async function handlePesaNotification(params, res) {
         const now = Date.now()
         const proUntil = addInterval(now, interval)
 
+        // 🔒 Server is source of truth — always apply upgrade for paid orders
         await userRef.set(
           {
             pro: true,
@@ -586,13 +591,6 @@ async function handlePesaNotification(params, res) {
           },
           { merge: true }
         )
-      } else {
-        // Unknown order — persist failed/unknown record but do not mark user pro
-        await db
-          .collection("orders")
-          .doc(mr)
-          .set({ status: "failed_unknown_order", statusPayload: status }, { merge: true })
-          .catch(() => {})
       }
     } else {
       // Not paid / missing data — record failure
@@ -619,12 +617,12 @@ async function handlePesaNotification(params, res) {
   }
 }
 
-
-        
- 
-
-app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
-app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
+app.get("/pesapal/ipn", ipnLimiter, (req, res) =>
+  handlePesaNotification(req.query, res)
+)
+app.post("/pesapal/ipn", ipnLimiter, (req, res) =>
+  handlePesaNotification(req.body, res)
+)
 
 /* ============== Admin Verification (break-glass) ============== */
 app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
