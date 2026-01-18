@@ -504,16 +504,23 @@ app.get('/pesapal/getStatus', async (req, res) => {
 async function handlePesaNotification(params, res) {
   try {
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
-    if (!orderTrackingId) return res.status(400).json({ ok:false, error:'Missing OrderTrackingId' })
+    if (!orderTrackingId) {
+      return res.status(400).json({ ok: false, error: "Missing OrderTrackingId" })
+    }
 
     // Fetch status from Pesapal (server-to-server)
     const { token, url } = await pesaToken()
-    const { data: status } = await axios.get(`${url}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
+    const { data: status } = await axios.get(
+      `${url}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(
+        orderTrackingId
+      )}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
+    )
 
-    const mr = String(status?.merchant_reference || '')
+    const mr = String(status?.merchant_reference || "")
     const match = mr.match(/^sub_([^_]+)_(.+?)_\d+$/)
     const planId = match ? match[1] : null
-    const uid    = match ? match[2] : null
+    const uid = match ? match[2] : null
 
     const paid = Number(status?.status_code) === 1
     const amount = status?.amount
@@ -522,40 +529,99 @@ async function handlePesaNotification(params, res) {
     // If paid and DB available, ensure we created the order and only then mark user pro
     if (paid && db && uid && mr) {
       // Verify the order doc exists (defensive)
-      const orderRef = db.collection('orders').doc(mr)
+      const orderRef = db.collection("orders").doc(mr)
       const orderSnap = await orderRef.get()
+
       if (orderSnap.exists) {
-        const finalPlanId = planId || amountToPlanId(amount) || 'pro_monthly'
-        const interval = INTERVAL_BY_PLAN[finalPlanId] || 'month'
+        const userRef = db.collection("users").doc(uid)
+        const userSnap = await userRef.get()
+
+        // 🔒 HARD RULE: Payments must NEVER create users
+        if (!userSnap.exists) {
+          console.error("🚨 Paid order for missing user profile:", uid)
+
+          await orderRef.set(
+            {
+              status: "paid_user_missing",
+              paidAt: admin.firestore.FieldValue.serverTimestamp(),
+              statusPayload: status,
+            },
+            { merge: true }
+          )
+
+          return res.json({
+            ok: false,
+            error: "User profile missing — cannot activate Pro",
+          })
+        }
+
+        const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
+        const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
         const now = Date.now()
         const proUntil = addInterval(now, interval)
 
-        await db.collection('users').doc(uid).set({
-          pro: true,
-          planId: finalPlanId,
-          proUntil,
-          proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-          lastPayment: { provider: 'pesapal', orderTrackingId, merchant_reference: mr, amount, currency, status: status?.payment_status_description }
-        }, { merge: true })
+        await userRef.set(
+          {
+            pro: true,
+            planId: finalPlanId,
+            proUntil,
+            proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastPayment: {
+              provider: "pesapal",
+              orderTrackingId,
+              merchant_reference: mr,
+              amount,
+              currency,
+              status: status?.payment_status_description,
+            },
+          },
+          { merge: true }
+        )
 
-        await orderRef.set({ status: 'paid', paidAt: admin.firestore.FieldValue.serverTimestamp(), statusPayload: status }, { merge: true })
+        await orderRef.set(
+          {
+            status: "paid",
+            paidAt: admin.firestore.FieldValue.serverTimestamp(),
+            statusPayload: status,
+          },
+          { merge: true }
+        )
       } else {
         // Unknown order — persist failed/unknown record but do not mark user pro
-        await db.collection('orders').doc(mr).set({ status: 'failed_unknown_order', statusPayload: status }, { merge: true }).catch(()=>{})
+        await db
+          .collection("orders")
+          .doc(mr)
+          .set({ status: "failed_unknown_order", statusPayload: status }, { merge: true })
+          .catch(() => {})
       }
     } else {
-      await db?.collection('orders').doc(mr || orderTrackingId).set({ status: 'failed', statusPayload: status }, { merge: true }).catch(()=>{})
+      // Not paid / missing data — record failure
+      await db
+        ?.collection("orders")
+        .doc(mr || orderTrackingId)
+        .set({ status: "failed", statusPayload: status }, { merge: true })
+        .catch(() => {})
     }
 
-    if (params?.OrderNotificationType === 'IPNCHANGE') {
-      return res.json({ orderNotificationType: 'IPNCHANGE', orderTrackingId, orderMerchantReference: status?.merchant_reference || '', status: 200 })
+    if (params?.OrderNotificationType === "IPNCHANGE") {
+      return res.json({
+        orderNotificationType: "IPNCHANGE",
+        orderTrackingId,
+        orderMerchantReference: status?.merchant_reference || "",
+        status: 200,
+      })
     }
-    return res.json({ ok:true, status })
+
+    return res.json({ ok: true, status })
   } catch (e) {
     const err = e?.response?.data || e?.message || String(e)
-    return res.status(500).json({ ok:false, error: err })
+    return res.status(500).json({ ok: false, error: err })
   }
 }
+
+
+        
+ 
 
 app.get('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.query, res))
 app.post('/pesapal/ipn', ipnLimiter, (req, res) => handlePesaNotification(req.body, res))
@@ -641,6 +707,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
