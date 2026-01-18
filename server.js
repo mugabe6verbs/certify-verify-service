@@ -487,6 +487,76 @@ if (req.user.firebase?.sign_in_provider === 'anonymous') {
 app.post('/api/pesapal/subscribe', authenticate, pesapalLimiter, subscribeHandler)
 app.post('/pesapal/createOrder',    authenticate, pesapalLimiter, subscribeHandler)
 
+/* ============== Billing Reconcile (Authenticated) ============== */
+app.post("/api/billing/reconcile", authenticate, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "Server missing Firebase credentials" })
+    }
+
+    const uid = req.user?.uid
+    if (!uid) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" })
+    }
+
+    const userRef = db.collection("users").doc(uid)
+    const userSnap = await userRef.get()
+
+    if (!userSnap.exists) {
+      return res.status(404).json({ ok: false, error: "User profile missing" })
+    }
+
+    // Find latest PAID subscription order for this user
+    const ordersSnap = await db
+      .collection("orders")
+      .where("uid", "==", uid)
+      .where("status", "==", "paid")
+      .orderBy("paidAt", "desc")
+      .limit(1)
+      .get()
+
+    if (ordersSnap.empty) {
+      return res.json({ ok: true, reconciled: false, reason: "No paid orders" })
+    }
+
+    const order = ordersSnap.docs[0].data()
+
+    const finalPlanId = order.planId || "pro_monthly"
+    const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
+    const now = Date.now()
+    const proUntil = addInterval(now, interval)
+
+    // Apply entitlement (idempotent)
+    await userRef.set(
+      {
+        pro: true,
+        planId: finalPlanId,
+        proUntil,
+        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastPayment: {
+          provider: order.provider || "pesapal",
+          orderTrackingId: order.orderTrackingId || null,
+          reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    )
+
+    return res.json({
+      ok: true,
+      reconciled: true,
+      planId: finalPlanId,
+      proUntil,
+    })
+  } catch (e) {
+    console.error("billing/reconcile error:", e)
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || "Server error",
+    })
+  }
+})
+
 /* ============== Pesapal: manual status check (optional) ============== */
 app.get('/pesapal/getStatus', async (req, res) => {
   try {
@@ -705,6 +775,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
