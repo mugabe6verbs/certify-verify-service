@@ -102,7 +102,13 @@ async function reconcileForUser(uid) {
     order.planId || amountToPlanId(order.amount) || "pro_monthly"
 
   const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-  const proUntil = addInterval(Date.now(), interval)
+
+const base = Math.max(
+  Date.now(),
+  Number(userSnap.get("proUntil") || 0)
+)
+
+const proUntil = addInterval(base, interval)
 
   const userRef = db.collection("users").doc(uid)
   const userSnap = await userRef.get()
@@ -322,6 +328,22 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
 
 /* ============== Admin rescue ============== */
 
+async function logAdminAction({ action, adminUid, targetUid, meta = {} }) {
+  if (!db) return
+
+  try {
+    await db.collection("adminLogs").add({
+      action,
+      adminUid,
+      targetUid: targetUid || null,
+      meta,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    })
+  } catch (e) {
+    console.warn("⚠ Failed to write admin log:", e?.message || e)
+  }
+}
+
 
 async function requireAdminAuth(req, res) {
   try {
@@ -373,19 +395,30 @@ app.post("/admin/setPro", async (req, res) => {
     }
 
     // 🔹 Update user subscription
-    await db.collection("users").doc(String(uid)).set(
-      {
-        pro: !!pro,
-        planId,
-        proUntil: !!pro ? addInterval(Date.now(), interval) : null,
-        proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastPayment: {
-          provider: "admin",
-          note,
-        },
-      },
-      { merge: true }
-    )
+    const userRef = db.collection("users").doc(String(uid))
+const userSnap = await userRef.get()
+
+const base = Math.max(
+  Date.now(),
+  Number(userSnap.get("proUntil") || 0)
+)
+
+const proUntil = !!pro ? addInterval(base, interval) : null
+
+await userRef.set(
+  {
+    pro: !!pro,
+    planId,
+    proUntil,
+    proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastPayment: {
+      provider: "admin",
+      note,
+    },
+  },
+  { merge: true }
+)
+
 
     // 🔍 AUDIT LOG (immutable, attributed)
     await logAdminAction({
@@ -644,8 +677,13 @@ async function handlePesaNotification(params, res) {
 
         const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
         const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-        const now = Date.now()
-        const proUntil = addInterval(now, interval)
+        const base = Math.max(
+  Date.now(),
+  Number(userSnap.get("proUntil") || 0)
+)
+
+const proUntil = addInterval(base, interval)
+
 
         // 🔒 Server is source of truth — always apply upgrade for paid orders
         await userRef.set(
