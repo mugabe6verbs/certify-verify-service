@@ -102,6 +102,12 @@ async function reconcileForUser(uid) {
     order.planId || amountToPlanId(order.amount) || "pro_monthly"
 
   const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
+const userRef = db.collection("users").doc(uid)
+const userSnap = await userRef.get()
+
+if (!userSnap.exists) {
+  return { ok: false, reconciled: false, reason: "user_missing" }
+}
 
 const base = Math.max(
   Date.now(),
@@ -109,9 +115,6 @@ const base = Math.max(
 )
 
 const proUntil = addInterval(base, interval)
-
-  const userRef = db.collection("users").doc(uid)
-  const userSnap = await userRef.get()
 
   if (!userSnap.exists) {
     return { ok: false, reconciled: false, reason: "user_missing" }
@@ -140,7 +143,6 @@ const proUntil = addInterval(base, interval)
     orderId: orderDoc.id,
   }
 }
-
 
 /* ============== Pesapal config ============== */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
@@ -826,6 +828,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
