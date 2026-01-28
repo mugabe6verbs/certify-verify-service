@@ -67,10 +67,13 @@ const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
 function amountToPlanId(amount) {
   const a = Number(amount)
-  if (a === 19) return 'pro_monthly'
-  if (a === 190) return 'pro_yearly'
+
+  if (Math.abs(a - 19) < 0.01) return 'pro_monthly'
+  if (Math.abs(a - 190) < 0.01) return 'pro_yearly'
+
   return null
 }
+
 function addInterval(ms, interval) {
   const d = new Date(ms)
   if (interval === 'year') d.setUTCFullYear(d.getUTCFullYear() + 1)
@@ -116,9 +119,6 @@ const base = Math.max(
 
 const proUntil = addInterval(base, interval)
 
-  if (!userSnap.exists) {
-    return { ok: false, reconciled: false, reason: "user_missing" }
-  }
 
   // Idempotent upgrade (safe to run multiple times)
   await userRef.set(
@@ -143,6 +143,7 @@ const proUntil = addInterval(base, interval)
     orderId: orderDoc.id,
   }
 }
+
 
 /* ============== Pesapal config ============== */
 const PESA_KEY    = clean(PESA_CONSUMER_KEY)
@@ -620,6 +621,9 @@ app.get('/pesapal/getStatus', async (req, res) => {
 /* ============== Pesapal: IPN (GET/POST) ============== */
 async function handlePesaNotification(params, res) {
   try {
+    if (params?.notification_id !== PESA_IPN_ID) {
+      return res.status(403).json({ ok: false, error: "Invalid IPN source" })
+    }
     const orderTrackingId = params?.OrderTrackingId || params?.orderTrackingId
     if (!orderTrackingId) {
       return res.status(400).json({ ok: false, error: "Missing OrderTrackingId" })
@@ -635,9 +639,24 @@ async function handlePesaNotification(params, res) {
     )
 
     const mr = String(status?.merchant_reference || "")
-    const match = mr.match(/^sub_([^_]+)_(.+?)_\d+$/)
-    const planId = match ? match[1] : null
-    const uid = match ? match[2] : null
+    let uid = null
+let planId = null
+
+if (db && mr) {
+  const orderSnap = await db.collection("orders").doc(mr).get()
+  if (orderSnap.exists) {
+    const order = orderSnap.data()
+    uid = order.uid || null
+    planId = order.planId || null
+  }
+}
+
+
+if (paid && (!uid || uid.startsWith("monthly_"))) {
+  console.error("🚨 IPN: Paid order but invalid UID resolution", { mr, uid })
+  return res.status(500).json({ ok: false, error: "UID resolution failed" })
+}
+
 
     const paid = Number(status?.status_code) === 1
     const amount = status?.amount
@@ -828,7 +847,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
 
 
 
