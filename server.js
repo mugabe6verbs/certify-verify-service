@@ -329,6 +329,102 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
   }
 })
 
+
+/* ============== Certificates issue ============== */
+
+app.post('/api/certificates/issue', authenticate, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
+    }
+
+    const uid = req.user.uid
+    const data = req.body || {}
+
+    // 🔒 Pro check
+    const userSnap = await db.collection('users').doc(uid).get()
+    if (!userSnap.exists || userSnap.get('pro') !== true) {
+      return res.status(403).json({ ok: false, error: 'Pro plan required' })
+    }
+
+    // 🔒 Quota check
+    const quotaSnap = await db.collection('quota').doc(uid).get()
+    const quota = quotaSnap.data() || {}
+    const used = Number(quota.usedToday || 0)
+    const limit = Number(quota.dailyLimit || 10)
+
+    if (used + 1 > limit) {
+      return res.status(429).json({
+        ok: false,
+        error: `Daily issue limit reached (${limit}/day)`
+      })
+    }
+
+    // 🔢 Serial generator
+    function gen() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+      const part = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+      return `${part()}-${part()}-${part()}`
+    }
+
+    let serial = null
+    for (let i = 0; i < 5; i++) {
+      const trySerial = gen()
+      const exists = await db.collection('certificates').doc(trySerial).get()
+      if (!exists.exists) {
+        serial = trySerial
+        break
+      }
+    }
+
+    if (!serial) {
+      return res.status(500).json({ ok: false, error: 'Failed to generate unique serial' })
+    }
+
+    // 📄 Firestore write
+    const payload = {
+      ...data,
+      ownerUid: uid,
+      serial,
+      status: 'valid',
+      visibility: 'public',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      history: [
+        {
+          action: 'issued',
+          by: uid,
+          at: admin.firestore.FieldValue.serverTimestamp(),
+          source: 'api'
+        }
+      ]
+    }
+
+    const batch = db.batch()
+
+    const certRef = db.collection('certificates').doc(serial)
+    batch.set(certRef, payload)
+
+    const quotaRef = db.collection('quota').doc(uid)
+    batch.set(quotaRef, {
+      usedToday: admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true })
+
+    await batch.commit()
+
+    const site = clean(PUBLIC_SITE_URL)
+    res.json({
+      ok: true,
+      serial,
+      verifyUrl: `${site}/verify/${serial}`
+    })
+
+  } catch (e) {
+    console.error('ISSUE CERT ERROR', e)
+    res.status(500).json({ ok: false, error: e?.message || 'Server error' })
+  }
+})
+
 /* ============== Admin rescue ============== */
 
 async function logAdminAction({ action, adminUid, targetUid, meta = {} }) {
@@ -847,6 +943,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
