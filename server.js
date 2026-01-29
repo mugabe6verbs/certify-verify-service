@@ -328,9 +328,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-
-
-/* ============== Certificates issue ============== */
+/* ============== Certificates issue (PRODUCTION SAFE) ============== */
 
 app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
@@ -341,13 +339,13 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
     const uid = req.user.uid
     const data = req.body || {}
 
-    // 🔒 Pro check
+    /* ---------- Pro Check ---------- */
     const userSnap = await db.collection('users').doc(uid).get()
     if (!userSnap.exists || userSnap.get('pro') !== true) {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
     }
 
-    // 🔒 Quota check
+    /* ---------- Quota Check ---------- */
     const quotaSnap = await db.collection('quota').doc(uid).get()
     const quota = quotaSnap.data() || {}
     const used = Number(quota.usedToday || 0)
@@ -360,10 +358,13 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       })
     }
 
-    // 🔢 Serial generator
+    /* ---------- Serial Generator ---------- */
     function gen() {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-      const part = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+      const part = () =>
+        Array.from({ length: 4 }, () =>
+          chars[Math.floor(Math.random() * chars.length)]
+        ).join('')
       return `${part()}-${part()}-${part()}`
     }
 
@@ -381,7 +382,12 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       return res.status(500).json({ ok: false, error: 'Failed to generate unique serial' })
     }
 
-    // 📄 Firestore write
+    /* ---------- Atomic Firestore Writes ---------- */
+    const batch = db.batch()
+
+    const certRef = db.collection('certificates').doc(serial)
+    const historyRef = certRef.collection('history').doc()
+
     const payload = {
       ...data,
       ownerUid: uid,
@@ -389,31 +395,36 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       status: 'valid',
       visibility: 'public',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      history: [
-        {
-          action: 'issued',
-          by: uid,
-          at: admin.firestore.FieldValue.serverTimestamp(),
-          source: 'api'
-        }
-      ]
+      immutable: true
     }
 
-    const batch = db.batch()
-
-    const certRef = db.collection('certificates').doc(serial)
+    // Create certificate
     batch.set(certRef, payload)
 
+    // Append immutable audit log (LEGAL serverTimestamp usage)
+    batch.set(historyRef, {
+      action: 'issued',
+      by: uid,
+      at: admin.firestore.FieldValue.serverTimestamp(),
+      source: 'api'
+    })
+
+    // Increment quota
     const quotaRef = db.collection('quota').doc(uid)
-    batch.set(quotaRef, {
-      usedToday: admin.firestore.FieldValue.increment(1),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true })
+    batch.set(
+      quotaRef,
+      {
+        usedToday: admin.firestore.FieldValue.increment(1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    )
 
     await batch.commit()
 
     const site = clean(PUBLIC_SITE_URL)
-    res.json({
+
+    return res.json({
       ok: true,
       serial,
       verifyUrl: `${site}/verify/${serial}`
@@ -421,7 +432,7 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
 
   } catch (e) {
     console.error('ISSUE CERT ERROR', e)
-    res.status(500).json({ ok: false, error: e?.message || 'Server error' })
+    return res.status(500).json({ ok: false, error: e?.message || 'Server error' })
   }
 })
 
@@ -467,6 +478,7 @@ async function requireAdminAuth(req, res) {
     res.status(401).json({ ok: false, error: "Invalid or expired token" })
     return null
   }
+  
 }
  /* ============== Admin: set Pro ============== */
 app.post("/admin/setPro", async (req, res) => {
@@ -943,8 +955,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
-
 
 
 
