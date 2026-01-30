@@ -38,6 +38,16 @@ function normalizeCountryCode(input) {
   return /^[A-Z]{2}$/.test(cc) ? cc : null
 }
 
+function generateSerial() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const part = () =>
+    Array.from({ length: 4 }, () =>
+      chars[Math.floor(Math.random() * chars.length)]
+    ).join('')
+  return `${part()}-${part()}-${part()}`
+}
+
+
 /* ============== Firebase Admin ============== */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
 const hasFirebaseCreds = !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && privateKey)
@@ -232,39 +242,35 @@ const adminVerifyLimiter = rateLimit({
   legacyHeaders: false
 })
 
-/* ============== Rate limite bulk prepare ============== */
-
-  const bulkLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
+const bulkLimiter = rateLimit({
+  windowMs: 60 * 1000,   // 1 minute
+  max: 5,               // max 5 bulk batches per minute per user/IP
   standardHeaders: true,
   legacyHeaders: false
 })
-
-app.post(
-  '/api/certificates/bulk/prepare',
-  bulkLimiter,
-  authenticate,
-  async (req, res) => { ... }
-)
 
 
 /* ======================================================
    AUTH
 ====================================================== */
-async function authenticate(req, res, next) {
+async function verifyToken(req) {
   try {
     const auth = req.headers.authorization || ""
-    if (!auth.startsWith("Bearer ")) {
-      return res.status(401).json({ ok: false, error: "Missing Bearer token" })
-    }
-
-    req.user = await admin.auth().verifyIdToken(auth.slice(7), true)
-    next()
+    if (!auth.startsWith("Bearer ")) return null
+    return await admin.auth().verifyIdToken(auth.slice(7), true)
   } catch {
-    res.status(401).json({ ok: false, error: "Invalid or expired token" })
+    return null
   }
 }
+async function authenticate(req, res, next) {
+  const decoded = await verifyToken(req)
+  if (!decoded) {
+    return res.status(401).json({ ok: false, error: "Invalid or missing token" })
+  }
+  req.user = decoded
+  next()
+}
+
 
 /* ============== Health & Debug (protected) ============== */
 app.get(['/health','/api/health'], (_req, res) => {
@@ -288,8 +294,11 @@ app.get('/pesapal/health', async (req, res) => {
 
 
 /* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
+const IS_PROD = process.env.NODE_ENV === 'production'
+
 app.get('/', (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (IS_PROD) {
+
     return res.json({ ok: true, service: 'Certify Verify Service', status: 'running' })
   }
 
@@ -375,18 +384,11 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
     }
 
     /* ---------- Serial Generator ---------- */
-    function gen() {
-      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-      const part = () =>
-        Array.from({ length: 4 }, () =>
-          chars[Math.floor(Math.random() * chars.length)]
-        ).join('')
-      return `${part()}-${part()}-${part()}`
-    }
+    
 
     let serial = null
     for (let i = 0; i < 5; i++) {
-      const trySerial = gen()
+      const trySerial = generateSerial()
       const exists = await db.collection('certificates').doc(trySerial).get()
       if (!exists.exists) {
         serial = trySerial
@@ -496,22 +498,15 @@ app.post(
         })
       }
 
-      /* ---------- Serial Generator ---------- */
-      function gen() {
-        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-        const part = () =>
-          Array.from({ length: 4 }, () =>
-            chars[Math.floor(Math.random() * chars.length)]
-          ).join('')
-        return `${part()}-${part()}-${part()}`
-      }
+      
 
       /* ---------- Generate Unique Serials ---------- */
       const serials = []
       const seen = new Set()
 
       while (serials.length < count) {
-        const s = gen()
+      const s = generateSerial()
+
         if (seen.has(s)) continue
 
         const exists = await db.collection('certificates').doc(s).get()
@@ -587,8 +582,9 @@ async function requireAdminAuth(req, res) {
       return null
     }
 
-    const idToken = authHeader.replace("Bearer ", "")
-    const decoded = await admin.auth().verifyIdToken(idToken, true)
+    
+    const decoded = await verifyToken(req)
+
 
     if (decoded.admin !== true) {
       res.status(403).json({ ok: false, error: "Admin access required" })
@@ -869,27 +865,28 @@ async function handlePesaNotification(params, res) {
       { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
     )
 
+    const paid = Number(status?.status_code) === 1
     const mr = String(status?.merchant_reference || "")
     let uid = null
-let planId = null
+    let planId = null
 
-if (db && mr) {
-  const orderSnap = await db.collection("orders").doc(mr).get()
-  if (orderSnap.exists) {
+    if (db && mr) {
+    const orderSnap = await db.collection("orders").doc(mr).get()
+    if (orderSnap.exists) {
     const order = orderSnap.data()
     uid = order.uid || null
     planId = order.planId || null
-  }
-}
+   }
+   }
 
 
-if (paid && (!uid || uid.startsWith("monthly_"))) {
-  console.error("🚨 IPN: Paid order but invalid UID resolution", { mr, uid })
-  return res.status(500).json({ ok: false, error: "UID resolution failed" })
-}
+   if (paid && (!uid || uid.startsWith("monthly_"))) {
+   console.error("🚨 IPN: Paid order but invalid UID resolution", { mr, uid })
+   return res.status(500).json({ ok: false, error: "UID resolution failed" })
+   }
 
 
-    const paid = Number(status?.status_code) === 1
+    
     const amount = status?.amount
     const currency = String(status?.currency || CURRENCY).toUpperCase()
 
