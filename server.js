@@ -232,7 +232,23 @@ const adminVerifyLimiter = rateLimit({
   legacyHeaders: false
 })
 
-    
+/* ============== Rate limite bulk prepare ============== */
+
+  const bulkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false
+})
+
+app.post(
+  '/api/certificates/bulk/prepare',
+  bulkLimiter,
+  authenticate,
+  async (req, res) => { ... }
+)
+
+
 /* ======================================================
    AUTH
 ====================================================== */
@@ -328,7 +344,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-/* ============== Certificates issue (PRODUCTION SAFE) ============== */
+/* ============== Certificates issue  ============== */
 
 app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
@@ -432,6 +448,106 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
 
   } catch (e) {
     console.error('ISSUE CERT ERROR', e)
+    return res.status(500).json({ ok: false, error: e?.message || 'Server error' })
+  }
+})
+
+
+/* ============== BULK CERTIFICATE PREPARE  ============== */
+app.post('/api/certificates/bulk/prepare', authenticate, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
+    }
+
+    const uid = req.user.uid
+    const { count, meta = {} } = req.body || {}
+
+    if (!Number.isInteger(count) || count <= 0 || count > 500) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid count (1–500 allowed per batch)'
+      })
+    }
+
+    /* ---------- Pro Check ---------- */
+    const userSnap = await db.collection('users').doc(uid).get()
+    if (!userSnap.exists || userSnap.get('pro') !== true) {
+      return res.status(403).json({ ok: false, error: 'Pro plan required' })
+    }
+
+    /* ---------- Quota Check ---------- */
+    const quotaRef = db.collection('quota').doc(uid)
+    const quotaSnap = await quotaRef.get()
+    const quota = quotaSnap.data() || {}
+
+    const used = Number(quota.usedToday || 0)
+    const limit = Number(quota.dailyLimit || 10)
+
+    if (used + count > limit) {
+      return res.status(429).json({
+        ok: false,
+        error: `Daily issue limit exceeded (${used}/${limit})`
+      })
+    }
+
+    /* ---------- Serial Generator ---------- */
+    function gen() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+      const part = () =>
+        Array.from({ length: 4 }, () =>
+          chars[Math.floor(Math.random() * chars.length)]
+        ).join('')
+      return `${part()}-${part()}-${part()}`
+    }
+
+    /* ---------- Generate Unique Serials ---------- */
+    const serials = []
+    const seen = new Set()
+
+    while (serials.length < count) {
+      const s = gen()
+      if (seen.has(s)) continue
+
+      const exists = await db.collection('certificates').doc(s).get()
+      if (!exists.exists) {
+        seen.add(s)
+        serials.push(s)
+      }
+    }
+
+    /* ---------- Batch Record ---------- */
+    const batchId = db.collection('bulkBatches').doc().id
+    const batchRef = db.collection('bulkBatches').doc(batchId)
+
+    const now = admin.firestore.FieldValue.serverTimestamp()
+    const batch = db.batch()
+
+    batch.set(batchRef, {
+      ownerUid: uid,
+      count,
+      serials,
+      status: 'prepared',
+      meta,
+      createdAt: now
+    })
+
+    /* ---------- Reserve Quota ---------- */
+    batch.set(quotaRef, {
+      usedToday: admin.firestore.FieldValue.increment(count),
+      updatedAt: now
+    }, { merge: true })
+
+    await batch.commit()
+
+    return res.json({
+      ok: true,
+      batchId,
+      serials
+    })
+
+  } catch (e) {
+    console.error('BULK PREPARE ERROR', e)
     return res.status(500).json({ ok: false, error: e?.message || 'Server error' })
   }
 })
@@ -955,6 +1071,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
