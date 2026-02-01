@@ -91,6 +91,49 @@ function addInterval(ms, interval) {
   return d.getTime()
 }
 
+// ================= QUOTA HELPERS (SERVER SOURCE OF TRUTH) =================
+
+// YYYY-MM-DD (UTC)
+function todayKey() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+// YYYY-MM (UTC)
+function monthKey() {
+  return new Date().toISOString().slice(0, 7)
+}
+
+// Monthly count from users.daily map
+function computeMonthlyCount(data) {
+  const daily = data?.daily || {}
+  const prefix = monthKey()
+  let sum = 0
+
+  for (const [k, v] of Object.entries(daily)) {
+    if (k.startsWith(prefix)) {
+      const n = Number(v || 0)
+      if (Number.isFinite(n) && n > 0) sum += n
+    }
+  }
+  return sum
+}
+
+// Plan limits (backend — NEVER trust frontend env)
+const FREE_MONTHLY_LIMIT = Number(process.env.FREE_MONTHLY_LIMIT || 10)
+const PRO_MONTHLY_LIMIT = Number(process.env.PRO_MONTHLY_LIMIT || 300)
+const PRO_YEARLY_MONTHLY_LIMIT = Number(
+  process.env.PRO_YEARLY_MONTHLY_LIMIT || PRO_MONTHLY_LIMIT
+)
+
+function getPlanLimit(planId) {
+  if (!planId) return FREE_MONTHLY_LIMIT
+  const s = String(planId).toLowerCase()
+  if (s.includes('year')) return PRO_YEARLY_MONTHLY_LIMIT
+  if (s.includes('month')) return PRO_MONTHLY_LIMIT
+  return PRO_MONTHLY_LIMIT
+}
+
+
 /* ============== Billing Reconcile Helper ============== */
 async function reconcileForUser(uid) {
   if (!db) throw new Error("DB not available")
@@ -370,18 +413,18 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
     }
 
-    /* ---------- Quota Check ---------- */
-    const quotaSnap = await db.collection('quota').doc(uid).get()
-    const quota = quotaSnap.data() || {}
-    const used = Number(quota.usedToday || 0)
-    const limit = Number(quota.dailyLimit || 10)
+   /* ---------- Monthly Quota Check (SERVER SOURCE OF TRUTH) ---------- */
+   const userData = userSnap.data() || {}
+   const monthlyUsed = computeMonthlyCount(userData)
+   const limit = getPlanLimit(userData.planId)
 
-    if (used + 1 > limit) {
-      return res.status(429).json({
-        ok: false,
-        error: `Daily issue limit reached (${limit}/day)`
-      })
-    }
+   if (monthlyUsed + 1 > limit) {
+   return res.status(429).json({
+    ok: false,
+    error: `Monthly issue limit reached (${limit}/month)`
+   })
+   }
+
 
     /* ---------- Serial Generator ---------- */
     
@@ -427,16 +470,20 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       source: 'api'
     })
 
-    // Increment quota
-    const quotaRef = db.collection('quota').doc(uid)
-    batch.set(
-      quotaRef,
-      {
-        usedToday: admin.firestore.FieldValue.increment(1),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    )
+    
+    // Increment user's daily bucket (monthly system)
+   const day = todayKey()
+   const userRef = db.collection('users').doc(uid)
+
+   batch.set(
+   userRef,
+   {
+    [`daily.${day}`]: admin.firestore.FieldValue.increment(1),
+    lastIssuedAt: admin.firestore.FieldValue.serverTimestamp()
+   },
+   { merge: true }
+  )
+
 
     await batch.commit()
 
@@ -456,7 +503,7 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
 
 
   /* ============== BULK CERTIFICATE PREPARE  ============== */
-app.post(
+ app.post(
   '/api/certificates/bulk/prepare',
   bulkLimiter,
   authenticate,
@@ -483,20 +530,18 @@ app.post(
         return res.status(403).json({ ok: false, error: 'Pro plan required' })
       }
 
-      /* ---------- Quota Check ---------- */
-      const quotaRef = db.collection('quota').doc(uid)
-      const quotaSnap = await quotaRef.get()
-      const quota = quotaSnap.data() || {}
+     /* ---------- Monthly Quota Check ---------- */
+  const userData = userSnap.data() || {}
+  const monthlyUsed = computeMonthlyCount(userData)
+  const limit = getPlanLimit(userData.planId)
 
-      const used = Number(quota.usedToday || 0)
-      const limit = Number(quota.dailyLimit || 10)
+  if (monthlyUsed + count > limit) {
+  return res.status(429).json({
+    ok: false,
+    error: `Monthly issue limit exceeded (${monthlyUsed}/${limit})`
+  })
+ }
 
-      if (used + count > limit) {
-        return res.status(429).json({
-          ok: false,
-          error: `Daily issue limit exceeded (${used}/${limit})`
-        })
-      }
 
       
 
@@ -533,10 +578,14 @@ app.post(
       })
 
       /* ---------- Reserve Quota ---------- */
-      batch.set(quotaRef, {
-        usedToday: admin.firestore.FieldValue.increment(count),
-        updatedAt: now
-      }, { merge: true })
+     const day = todayKey()
+     const userRef = db.collection('users').doc(uid)
+
+     batch.set(userRef, {
+     [`daily.${day}`]: admin.firestore.FieldValue.increment(count),
+     lastIssuedAt: now
+     }, { merge: true })
+
 
       await batch.commit()
 
