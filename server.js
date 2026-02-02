@@ -185,6 +185,53 @@ async function checkAndReserveQuota(uid, count) {
 }
 
 
+// Transaction-safe quota checker 
+async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
+  if (!db) throw new Error("DB not available")
+
+  const userRef = db.collection("users").doc(uid)
+  const snap = await tx.get(userRef)
+  const data = snap.exists ? snap.data() : {}
+
+  const planId = String(data.planId || "free").toLowerCase()
+  const limits =
+    PLAN_LIMITS[planId] ||
+    (planId.includes("year")
+      ? PLAN_LIMITS.pro_yearly
+      : planId.includes("month")
+      ? PLAN_LIMITS.pro_monthly
+      : PLAN_LIMITS.free)
+
+  const day = todayKey()
+  const dailyMap = data.daily || {}
+
+  const usedToday = Number(dailyMap[day] || 0)
+  const usedThisMonth = computeMonthlyCount(data)
+
+  if (usedToday + count > limits.daily) {
+    return { ok: false, reason: "daily", limit: limits.daily }
+  }
+
+  if (usedThisMonth + count > limits.monthly) {
+    return { ok: false, reason: "monthly", limit: limits.monthly }
+  }
+
+  tx.set(
+    userRef,
+    {
+      [`daily.${day}`]: usedToday + count,
+      lastIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  )
+
+  return {
+    ok: true,
+    plan: planId,
+    usedToday: usedToday + count,
+    usedThisMonth: usedThisMonth + count,
+  }
+}
 
 
 /* ============== Billing Reconcile Helper ============== */
@@ -487,16 +534,18 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       }
 
       /* ---------- Quota Check (ATOMIC) ---------- */
-      const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
-      if (!quotaResult.ok) {
-        throw new Error(
-          quotaResult.reason === 'daily'
-            ? `Daily limit reached (${quotaResult.limit}/day)`
-            : `Monthly limit reached (${quotaResult.limit}/month)`
-        )
-      }
 
-     
+     const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
+
+if (!quotaResult.ok) {
+  throw new Error(
+    quotaResult.reason === "daily"
+      ? `DAILY_LIMIT_${quotaResult.limit}`
+      : `MONTHLY_LIMIT_${quotaResult.limit}`
+  )
+}
+
+
       /* ---------- Serial Generator ---------- */
       let serial = null
       const now = admin.firestore.FieldValue.serverTimestamp()
@@ -559,7 +608,7 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
     }
 
-    if (e.message?.includes('limit')) {
+    if (e.message?.toLowerCase().includes('limit')) {
       return res.status(429).json({ ok: false, error: e.message })
     }
 
@@ -609,7 +658,7 @@ app.post(
         }
 
         /* ---------- Quota Check (ATOMIC) ---------- */
-        const quotaResult = await checkAndReserveQuotaTx(tx, uid, count)
+        const quotaResult = await checkAndConsumeQuotaTx(tx, uid, count)
         if (!quotaResult.ok) {
           throw new Error(
             quotaResult.reason === 'daily'
@@ -1195,7 +1244,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
 
 
 
