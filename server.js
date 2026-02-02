@@ -496,29 +496,25 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
         )
       }
 
-      /* ---------- Serial Generator (LOCKED) ---------- */
+     
+      /* ---------- Serial Generator ---------- */
       let serial = null
       const now = admin.firestore.FieldValue.serverTimestamp()
 
-      for (let i = 0; i < 5; i++) {
-        const trySerial = generateSerial()
-        const certRef = db.collection('certificates').doc(trySerial)
-        const snap = await tx.get(certRef)
+     for (let i = 0; i < 5; i++) {
+     const trySerial = generateSerial()
+     const certRef = db.collection('certificates').doc(trySerial)
+     const snap = await tx.get(certRef)
 
-        if (!snap.exists) {
-          tx.set(certRef, {
-            reserved: true,
-            reservedBy: uid,
-            reservedAt: now
-          })
-          serial = trySerial
-          break
-        }
-      }
+     if (!snap.exists) {
+     serial = trySerial
+     break
+     }
+   }
 
-      if (!serial) {
-        throw new Error('SERIAL_GENERATION_FAILED')
-      }
+   if (!serial) {
+   throw new Error('SERIAL_GENERATION_FAILED')
+   }
 
       const certRef = db.collection('certificates').doc(serial)
       const historyRef = certRef.collection('history').doc()
@@ -1199,6 +1195,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
