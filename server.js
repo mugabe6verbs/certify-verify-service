@@ -130,59 +130,60 @@ const PLAN_LIMITS = {
 }
 
 // Atomic check + consume quota (daily + monthly)
-async function checkAndConsumeQuota(uid, count = 1) {
+async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
   if (!db) throw new Error("DB not available")
 
   const userRef = db.collection("users").doc(uid)
+  const snap = await tx.get(userRef)
+  const data = snap.exists ? snap.data() : {}
 
-  return await db.runTransaction(async (tx) => {
-    const snap = await tx.get(userRef)
-    const data = snap.exists ? snap.data() : {}
+  const planId = String(data.planId || "free").toLowerCase()
+  const limits =
+    PLAN_LIMITS[planId] ||
+    (planId.includes("year")
+      ? PLAN_LIMITS.pro_yearly
+      : planId.includes("month")
+      ? PLAN_LIMITS.pro_monthly
+      : PLAN_LIMITS.free)
 
-    const planId = String(data.planId || "free").toLowerCase()
-    const limits =
-      PLAN_LIMITS[planId] ||
-      (planId.includes("year")
-        ? PLAN_LIMITS.pro_yearly
-        : planId.includes("month")
-        ? PLAN_LIMITS.pro_monthly
-        : PLAN_LIMITS.free)
+  const day = todayKey()
+  const daily = data.daily || {}
 
-    const day = todayKey()
-    const dailyMap = data.daily || {}
+  const usedToday = Number(daily[day] || 0)
+  const usedThisMonth = computeMonthlyCount({ daily })
 
-    const usedToday = Number(dailyMap[day] || 0)
-    const usedThisMonth = computeMonthlyCount(data)
+  if (usedToday + count > limits.daily) {
+    return { ok: false, reason: "daily", limit: limits.daily }
+  }
 
-    if (usedToday + count > limits.daily) {
-      return { ok: false, reason: "daily", limit: limits.daily }
-    }
+  if (usedThisMonth + count > limits.monthly) {
+    return { ok: false, reason: "monthly", limit: limits.monthly }
+  }
 
-    if (usedThisMonth + count > limits.monthly) {
-      return { ok: false, reason: "monthly", limit: limits.monthly }
-    }
-
-    tx.set(
-      userRef,
-      {
-        [`daily.${day}`]: usedToday + count,
-        lastIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+  // 🔥 This is the money line
+  tx.set(
+    userRef,
+    {
+      daily: {
+        [day]: admin.firestore.FieldValue.increment(count),
       },
-      { merge: true }
-    )
+      lastIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  )
 
-    return {
-      ok: true,
-      plan: planId,
-      usedToday: usedToday + count,
-      usedThisMonth: usedThisMonth + count,
-    }
-  })
+  return {
+    ok: true,
+    plan: planId,
+    usedToday: usedToday + count,
+    usedThisMonth: usedThisMonth + count,
+  }
 }
 
-async function checkAndReserveQuota(uid, count) {
-  return checkAndConsumeQuota(uid, count)
-}
+     
+
+    
+  
 
 
 // Transaction-safe quota checker 
@@ -1250,6 +1251,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
