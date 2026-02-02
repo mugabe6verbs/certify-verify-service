@@ -7,6 +7,8 @@ import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 
+
+
 const {
   PORT = 8080,
   FIREBASE_PROJECT_ID,
@@ -91,7 +93,7 @@ function addInterval(ms, interval) {
   return d.getTime()
 }
 
-// ================= QUOTA HELPERS (SERVER SOURCE OF TRUTH) =================
+// ================= QUOTA HELPERS  =================
 
 // YYYY-MM-DD (UTC)
 function todayKey() {
@@ -118,20 +120,71 @@ function computeMonthlyCount(data) {
   return sum
 }
 
-// Plan limits (backend — NEVER trust frontend env)
-const FREE_MONTHLY_LIMIT = Number(process.env.FREE_MONTHLY_LIMIT || 10)
-const PRO_MONTHLY_LIMIT = Number(process.env.PRO_MONTHLY_LIMIT || 300)
-const PRO_YEARLY_MONTHLY_LIMIT = Number(
-  process.env.PRO_YEARLY_MONTHLY_LIMIT || PRO_MONTHLY_LIMIT
-)
 
-function getPlanLimit(planId) {
-  if (!planId) return FREE_MONTHLY_LIMIT
-  const s = String(planId).toLowerCase()
-  if (s.includes('year')) return PRO_YEARLY_MONTHLY_LIMIT
-  if (s.includes('month')) return PRO_MONTHLY_LIMIT
-  return PRO_MONTHLY_LIMIT
+// Daily + Monthly limits by plan (SERVER AUTHORITY)
+const PLAN_LIMITS = {
+  free: { monthly: 10, daily: 5 },
+  pro_monthly: { monthly: 300, daily: 100 },
+  pro_yearly: { monthly: 1000, daily: 300 },
+  pro: { monthly: 300, daily: 100 } // fallback
 }
+
+// Atomic check + consume quota (daily + monthly)
+async function checkAndConsumeQuota(uid, count = 1) {
+  if (!db) throw new Error("DB not available")
+
+  const userRef = db.collection("users").doc(uid)
+
+  return await db.runTransaction(async (tx) => {
+    const snap = await tx.get(userRef)
+    const data = snap.exists ? snap.data() : {}
+
+    const planId = String(data.planId || "free").toLowerCase()
+    const limits =
+      PLAN_LIMITS[planId] ||
+      (planId.includes("year")
+        ? PLAN_LIMITS.pro_yearly
+        : planId.includes("month")
+        ? PLAN_LIMITS.pro_monthly
+        : PLAN_LIMITS.free)
+
+    const day = todayKey()
+    const dailyMap = data.daily || {}
+
+    const usedToday = Number(dailyMap[day] || 0)
+    const usedThisMonth = computeMonthlyCount(data)
+
+    if (usedToday + count > limits.daily) {
+      return { ok: false, reason: "daily", limit: limits.daily }
+    }
+
+    if (usedThisMonth + count > limits.monthly) {
+      return { ok: false, reason: "monthly", limit: limits.monthly }
+    }
+
+    tx.set(
+      userRef,
+      {
+        [`daily.${day}`]: usedToday + count,
+        lastIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+
+    return {
+      ok: true,
+      plan: planId,
+      usedToday: usedToday + count,
+      usedThisMonth: usedThisMonth + count,
+    }
+  })
+}
+
+async function checkAndReserveQuota(uid, count) {
+  return checkAndConsumeQuota(uid, count)
+}
+
+
 
 
 /* ============== Billing Reconcile Helper ============== */
@@ -276,7 +329,7 @@ app.use(express.json({ limit: '2mb' }))
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
 const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
 const ipnLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false })
-app.use(globalLimiter)
+app.use('/api', globalLimiter)
 
 const adminVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -338,14 +391,20 @@ app.get('/pesapal/health', async (req, res) => {
 
 /* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
 const IS_PROD = process.env.NODE_ENV === 'production'
+app.get('/', async (req, res) => {
+  let decoded = null
 
-app.get('/', (req, res) => {
-  if (IS_PROD) {
+  try {
+    decoded = await verifyToken(req)
+  } catch {
+    decoded = null
+  }
 
+  if (IS_PROD || !decoded || decoded.admin !== true) {
     return res.json({ ok: true, service: 'Certify Verify Service', status: 'running' })
   }
 
-  // Otherwise (if admin or dev environment), display the full debug info
+  // Otherwise (admin + dev), display the full debug info
   const maskedSA = (FIREBASE_CLIENT_EMAIL || '').replace(/(.{3}).+(@.+)/, '$1***$2')
   const origin = serverOrigin(req)
   res.type('html').send(`
@@ -381,7 +440,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
     const { idToken } = req.body || {}
     if (!idToken) return res.status(400).json({ ok:false, error:'Missing idToken' })
-    const decoded = await admin.auth().verifyIdToken(String(idToken))
+    const decoded = await admin.auth().verifyIdToken(String(idToken), true)
     const uid = decoded.uid
     if (!(await isManualProEnabled())) return res.status(403).json({ ok:false, error:'Manual Pro disabled' })
     await db.collection('users').doc(uid).set({
@@ -396,7 +455,8 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
-/* ============== Certificates issue  ============== */
+
+/* ============== CERTIFICATES ISSUE  ============== */
 
 app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
@@ -404,116 +464,133 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
     }
 
-    const uid = req.user.uid
+    const uid = req.user?.uid
+    if (!uid) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' })
+    }
+
     const data = req.body || {}
 
-    /* ---------- Pro Check ---------- */
-    const userSnap = await db.collection('users').doc(uid).get()
-    if (!userSnap.exists || userSnap.get('pro') !== true) {
-      return res.status(403).json({ ok: false, error: 'Pro plan required' })
+    // Basic payload guard
+    if (!data.recipientName || !data.courseTitle || !data.orgName) {
+      return res.status(400).json({ ok: false, error: 'Missing required fields' })
     }
 
-   /* ---------- Monthly Quota Check (SERVER SOURCE OF TRUTH) ---------- */
-   const userData = userSnap.data() || {}
-   const monthlyUsed = computeMonthlyCount(userData)
-   const limit = getPlanLimit(userData.planId)
+    const userRef = db.collection('users').doc(uid)
 
-   if (monthlyUsed + 1 > limit) {
-   return res.status(429).json({
-    ok: false,
-    error: `Monthly issue limit reached (${limit}/month)`
-   })
-   }
+    const result = await db.runTransaction(async (tx) => {
+      const userSnap = await tx.get(userRef)
 
-
-    /* ---------- Serial Generator ---------- */
-    
-
-    let serial = null
-    for (let i = 0; i < 5; i++) {
-      const trySerial = generateSerial()
-      const exists = await db.collection('certificates').doc(trySerial).get()
-      if (!exists.exists) {
-        serial = trySerial
-        break
+      /* ---------- Pro Check ---------- */
+      if (!userSnap.exists || userSnap.get('pro') !== true) {
+        throw new Error('PRO_REQUIRED')
       }
-    }
 
-    if (!serial) {
-      return res.status(500).json({ ok: false, error: 'Failed to generate unique serial' })
-    }
+      /* ---------- Quota Check (ATOMIC) ---------- */
+      const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
+      if (!quotaResult.ok) {
+        throw new Error(
+          quotaResult.reason === 'daily'
+            ? `Daily limit reached (${quotaResult.limit}/day)`
+            : `Monthly limit reached (${quotaResult.limit}/month)`
+        )
+      }
 
-    /* ---------- Atomic Firestore Writes ---------- */
-    const batch = db.batch()
+      /* ---------- Serial Generator (LOCKED) ---------- */
+      let serial = null
+      const now = admin.firestore.FieldValue.serverTimestamp()
 
-    const certRef = db.collection('certificates').doc(serial)
-    const historyRef = certRef.collection('history').doc()
+      for (let i = 0; i < 5; i++) {
+        const trySerial = generateSerial()
+        const certRef = db.collection('certificates').doc(trySerial)
+        const snap = await tx.get(certRef)
 
-    const payload = {
-      ...data,
-      ownerUid: uid,
-      serial,
-      status: 'valid',
-      visibility: 'public',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      immutable: true
-    }
+        if (!snap.exists) {
+          tx.set(certRef, {
+            reserved: true,
+            reservedBy: uid,
+            reservedAt: now
+          })
+          serial = trySerial
+          break
+        }
+      }
 
-    // Create certificate
-    batch.set(certRef, payload)
+      if (!serial) {
+        throw new Error('SERIAL_GENERATION_FAILED')
+      }
 
-    // Append immutable audit log (LEGAL serverTimestamp usage)
-    batch.set(historyRef, {
-      action: 'issued',
-      by: uid,
-      at: admin.firestore.FieldValue.serverTimestamp(),
-      source: 'api'
+      const certRef = db.collection('certificates').doc(serial)
+      const historyRef = certRef.collection('history').doc()
+
+      const payload = {
+        ...data,
+        ownerUid: uid,
+        serial,
+        status: 'valid',
+        visibility: 'public',
+        immutable: true,
+        createdAt: now,
+        reserved: false
+      }
+
+      // Certificate write
+      tx.set(certRef, payload, { merge: true })
+
+      // Immutable audit log
+      tx.set(historyRef, {
+        action: 'issued',
+        by: uid,
+        at: now,
+        source: 'api'
+      })
+
+      return { serial }
     })
-
-    
-    // Increment user's daily bucket (monthly system)
-   const day = todayKey()
-   const userRef = db.collection('users').doc(uid)
-
-   batch.set(
-   userRef,
-   {
-    [`daily.${day}`]: admin.firestore.FieldValue.increment(1),
-    lastIssuedAt: admin.firestore.FieldValue.serverTimestamp()
-   },
-   { merge: true }
-  )
-
-
-    await batch.commit()
 
     const site = clean(PUBLIC_SITE_URL)
 
     return res.json({
       ok: true,
-      serial,
-      verifyUrl: `${site}/verify/${serial}`
+      serial: result.serial,
+      verifyUrl: `${site}/verify/${result.serial}`
     })
 
   } catch (e) {
     console.error('ISSUE CERT ERROR', e)
-    return res.status(500).json({ ok: false, error: e?.message || 'Server error' })
+
+    if (e.message === 'PRO_REQUIRED') {
+      return res.status(403).json({ ok: false, error: 'Pro plan required' })
+    }
+
+    if (e.message?.includes('limit')) {
+      return res.status(429).json({ ok: false, error: e.message })
+    }
+
+    if (e.message === 'SERIAL_GENERATION_FAILED') {
+      return res.status(500).json({ ok: false, error: 'Failed to generate unique serial' })
+    }
+
+    return res.status(500).json({ ok: false, error: 'Server error' })
   }
 })
+/* ============== BULK CERTIFICATE PREPARE  ============== */
 
-
-  /* ============== BULK CERTIFICATE PREPARE  ============== */
- app.post(
+app.post(
   '/api/certificates/bulk/prepare',
-  bulkLimiter,
   authenticate,
+  bulkLimiter,
   async (req, res) => {
     try {
       if (!db) {
         return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
       }
 
-      const uid = req.user.uid
+      const uid = req.user?.uid
+      if (!uid) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized' })
+      }
+
       const { count, meta = {} } = req.body || {}
 
       /* ---------- Validate ---------- */
@@ -524,85 +601,82 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
         })
       }
 
-      /* ---------- Pro Check ---------- */
-      const userSnap = await db.collection('users').doc(uid).get()
-      if (!userSnap.exists || userSnap.get('pro') !== true) {
-        return res.status(403).json({ ok: false, error: 'Pro plan required' })
-      }
+      const userRef = db.collection('users').doc(uid)
+      const batchRef = db.collection('bulkBatches').doc()
 
-     /* ---------- Monthly Quota Check ---------- */
-  const userData = userSnap.data() || {}
-  const monthlyUsed = computeMonthlyCount(userData)
-  const limit = getPlanLimit(userData.planId)
+      const result = await db.runTransaction(async (tx) => {
+        const userSnap = await tx.get(userRef)
 
-  if (monthlyUsed + count > limit) {
-  return res.status(429).json({
-    ok: false,
-    error: `Monthly issue limit exceeded (${monthlyUsed}/${limit})`
-  })
- }
-
-
-      
-
-      /* ---------- Generate Unique Serials ---------- */
-      const serials = []
-      const seen = new Set()
-
-      while (serials.length < count) {
-      const s = generateSerial()
-
-        if (seen.has(s)) continue
-
-        const exists = await db.collection('certificates').doc(s).get()
-        if (!exists.exists) {
-          seen.add(s)
-          serials.push(s)
+        /* ---------- Pro Check ---------- */
+        if (!userSnap.exists || userSnap.get('pro') !== true) {
+          throw new Error('PRO_REQUIRED')
         }
-      }
 
-      /* ---------- Create Batch Record ---------- */
-      const batchId = db.collection('bulkBatches').doc().id
-      const batchRef = db.collection('bulkBatches').doc(batchId)
+        /* ---------- Quota Check (ATOMIC) ---------- */
+        const quotaResult = await checkAndReserveQuotaTx(tx, uid, count)
+        if (!quotaResult.ok) {
+          throw new Error(
+            quotaResult.reason === 'daily'
+              ? `Daily bulk limit reached (${quotaResult.limit}/day)`
+              : `Monthly bulk limit reached (${quotaResult.limit}/month)`
+          )
+        }
 
-      const now = admin.firestore.FieldValue.serverTimestamp()
-      const batch = db.batch()
+        /* ---------- Generate + LOCK Serials ---------- */
+        const serials = []
+        const now = admin.firestore.FieldValue.serverTimestamp()
 
-      batch.set(batchRef, {
-        ownerUid: uid,
-        count,
-        serials,
-        status: 'prepared',
-        meta,
-        createdAt: now
+        while (serials.length < count) {
+          const s = generateSerial()
+          const certRef = db.collection('certificates').doc(s)
+          const snap = await tx.get(certRef)
+
+          if (!snap.exists) {
+            tx.set(certRef, {
+              reserved: true,
+              reservedBy: uid,
+              batchId: batchRef.id,
+              reservedAt: now
+            })
+            serials.push(s)
+          }
+        }
+
+        /* ---------- Batch Record ---------- */
+        tx.set(batchRef, {
+          ownerUid: uid,
+          count,
+          serials,
+          status: 'prepared',
+          meta: {
+            ...meta,
+            ip: req.ip,
+            ua: req.headers['user-agent']
+          },
+          createdAt: now
+        })
+
+        return { serials, batchId: batchRef.id }
       })
 
-      /* ---------- Reserve Quota ---------- */
-     const day = todayKey()
-     const userRef = db.collection('users').doc(uid)
-
-     batch.set(userRef, {
-     [`daily.${day}`]: admin.firestore.FieldValue.increment(count),
-     lastIssuedAt: now
-     }, { merge: true })
-
-
-      await batch.commit()
-
-      return res.json({
-        ok: true,
-        batchId,
-        serials
-      })
+      return res.json({ ok: true, ...result })
 
     } catch (e) {
       console.error('BULK PREPARE ERROR', e)
-      return res.status(500).json({ ok: false, error: e?.message || 'Server error' })
+
+      if (e.message === 'PRO_REQUIRED') {
+        return res.status(403).json({ ok: false, error: 'Pro plan required' })
+      }
+
+      if (e.message?.includes('limit')) {
+        return res.status(429).json({ ok: false, error: e.message })
+      }
+
+      return res.status(500).json({ ok: false, error: 'Server error' })
     }
   }
 )
-  
-   
+
 /* ============== Admin rescue ============== */
 
 async function logAdminAction({ action, adminUid, targetUid, meta = {} }) {
@@ -1051,7 +1125,8 @@ app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
     return res.status(403).json({ ok: false })
   }
 
-  const decoded = await admin.auth().verifyIdToken(idToken)
+  const decoded = await admin.auth().verifyIdToken(idToken, true)
+
   await admin.auth().setCustomUserClaims(decoded.uid, { admin: true })
   await admin.auth().revokeRefreshTokens(decoded.uid)
 
