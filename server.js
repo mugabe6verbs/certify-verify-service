@@ -505,6 +505,7 @@ app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) =>
 
 /* ============== CERTIFICATES ISSUE  ============== */
 
+
 app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
     if (!db) {
@@ -526,45 +527,42 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
     const userRef = db.collection('users').doc(uid)
 
     const result = await db.runTransaction(async (tx) => {
+      /* ---------- READ PHASE ---------- */
       const userSnap = await tx.get(userRef)
 
-      /* ---------- Pro Check ---------- */
+      // Pro check
       if (!userSnap.exists || userSnap.get('pro') !== true) {
         throw new Error('PRO_REQUIRED')
       }
 
-      /* ---------- Quota Check (ATOMIC) ---------- */
-
-     const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
-
-if (!quotaResult.ok) {
-  throw new Error(
-    quotaResult.reason === "daily"
-      ? `DAILY_LIMIT_${quotaResult.limit}`
-      : `MONTHLY_LIMIT_${quotaResult.limit}`
-  )
-}
-
-
-      /* ---------- Serial Generator ---------- */
+      // Generate unique serial (READ ONLY)
       let serial = null
+      for (let i = 0; i < 5; i++) {
+        const trySerial = generateSerial()
+        const certRef = db.collection('certificates').doc(trySerial)
+        const snap = await tx.get(certRef) // READ
+
+        if (!snap.exists) {
+          serial = trySerial
+          break
+        }
+      }
+
+      if (!serial) {
+        throw new Error('SERIAL_GENERATION_FAILED')
+      }
+
+      /* ---------- WRITE PHASE ---------- */
+      const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
+      if (!quotaResult.ok) {
+        throw new Error(
+          quotaResult.reason === "daily"
+            ? `DAILY_LIMIT_${quotaResult.limit}`
+            : `MONTHLY_LIMIT_${quotaResult.limit}`
+        )
+      }
+
       const now = admin.firestore.FieldValue.serverTimestamp()
-
-     for (let i = 0; i < 5; i++) {
-     const trySerial = generateSerial()
-     const certRef = db.collection('certificates').doc(trySerial)
-     const snap = await tx.get(certRef)
-
-     if (!snap.exists) {
-     serial = trySerial
-     break
-     }
-   }
-
-   if (!serial) {
-   throw new Error('SERIAL_GENERATION_FAILED')
-   }
-
       const certRef = db.collection('certificates').doc(serial)
       const historyRef = certRef.collection('history').doc()
 
@@ -579,16 +577,18 @@ if (!quotaResult.ok) {
         reserved: false
       }
 
-      // Certificate write
+      // Writes
       tx.set(certRef, payload, { merge: true })
-
-      // Immutable audit log
       tx.set(historyRef, {
         action: 'issued',
         by: uid,
         at: now,
         source: 'api'
       })
+    
+      
+// Commit confirmation log 
+console.log("ISSUE CERT TX COMMIT:", { uid, serial })
 
       return { serial }
     })
@@ -619,6 +619,7 @@ if (!quotaResult.ok) {
     return res.status(500).json({ ok: false, error: 'Server error' })
   }
 })
+
 /* ============== BULK CERTIFICATE PREPARE  ============== */
 
 app.post(
@@ -638,7 +639,6 @@ app.post(
 
       const { count, meta = {} } = req.body || {}
 
-      /* ---------- Validate ---------- */
       if (!Number.isInteger(count) || count <= 0 || count > 500) {
         return res.status(400).json({
           ok: false,
@@ -650,14 +650,26 @@ app.post(
       const batchRef = db.collection('bulkBatches').doc()
 
       const result = await db.runTransaction(async (tx) => {
+        /* ---------- READ PHASE ---------- */
         const userSnap = await tx.get(userRef)
 
-        /* ---------- Pro Check ---------- */
         if (!userSnap.exists || userSnap.get('pro') !== true) {
           throw new Error('PRO_REQUIRED')
         }
 
-        /* ---------- Quota Check (ATOMIC) ---------- */
+        // Generate all serials (READ ONLY)
+        const serials = []
+        while (serials.length < count) {
+          const s = generateSerial()
+          const certRef = db.collection('certificates').doc(s)
+          const snap = await tx.get(certRef) // READ
+
+          if (!snap.exists) {
+            serials.push(s)
+          }
+        }
+
+        /* ---------- WRITE PHASE ---------- */
         const quotaResult = await checkAndConsumeQuotaTx(tx, uid, count)
         if (!quotaResult.ok) {
           throw new Error(
@@ -667,27 +679,20 @@ app.post(
           )
         }
 
-        /* ---------- Generate + LOCK Serials ---------- */
-        const serials = []
         const now = admin.firestore.FieldValue.serverTimestamp()
 
-        while (serials.length < count) {
-          const s = generateSerial()
+        // Lock serials
+        for (const s of serials) {
           const certRef = db.collection('certificates').doc(s)
-          const snap = await tx.get(certRef)
-
-          if (!snap.exists) {
-            tx.set(certRef, {
-              reserved: true,
-              reservedBy: uid,
-              batchId: batchRef.id,
-              reservedAt: now
-            })
-            serials.push(s)
-          }
+          tx.set(certRef, {
+            reserved: true,
+            reservedBy: uid,
+            batchId: batchRef.id,
+            reservedAt: now
+          })
         }
 
-        /* ---------- Batch Record ---------- */
+        // Batch record
         tx.set(batchRef, {
           ownerUid: uid,
           count,
@@ -713,7 +718,7 @@ app.post(
         return res.status(403).json({ ok: false, error: 'Pro plan required' })
       }
 
-      if (e.message?.includes('limit')) {
+      if (e.message?.toLowerCase().includes('limit')) {
         return res.status(429).json({ ok: false, error: e.message })
       }
 
@@ -721,6 +726,7 @@ app.post(
     }
   }
 )
+
 
 /* ============== Admin rescue ============== */
 
