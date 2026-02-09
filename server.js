@@ -26,6 +26,19 @@ const {
   ADMIN_PASSWORD 
 } = process.env
 
+const FREE_TEMPLATES = ['minimal', 'classic-border']
+
+const PRO_TEMPLATES = [
+  'modern',
+  'luxury',
+  'photo',
+  'academic-seal',
+  'creative'
+]
+
+const ALL_TEMPLATES = [...FREE_TEMPLATES, ...PRO_TEMPLATES]
+
+
 /* ============== Small helpers ============== */
 const clean = (s) => (s || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
 const mask  = (s) => (s && s.length >= 8 ? s.slice(0,4)+'…'+s.slice(-4) : '(empty)')
@@ -311,8 +324,12 @@ async function pesaToken(preferred = PESA_MODE) {
 
 /* ============== App / CORS / Middleware ============== */
 const app = express()
-
-
+app.use((req, res, next) => {
+  res.setTimeout(15000, () => {
+    res.status(503).json({ ok: false, error: 'Request timeout' })
+  })
+  next()
+})
 app.set('trust proxy', 1)
 
 const allowList = (ALLOW_ORIGINS || '')
@@ -343,6 +360,8 @@ app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 
 app.use(helmet())
+app.disable('x-powered-by')
+
 app.use(compression())
 app.use(express.json({ limit: '2mb' }))
 
@@ -490,13 +509,17 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
     if (!uid) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
+const data = req.body || {}
 
-    const data = req.body || {}
+// Stronger payload guard (prevents empty or whitespace values)
+if (
+  !String(data.recipientName || '').trim() ||
+  !String(data.courseTitle || '').trim() ||
+  !String(data.orgName || '').trim()
+) {
+  return res.status(400).json({ ok: false, error: 'Missing required fields' })
+}
 
-    // Basic payload guard
-    if (!data.recipientName || !data.courseTitle || !data.orgName) {
-      return res.status(400).json({ ok: false, error: 'Missing required fields' })
-    }
 
     const userRef = db.collection('users').doc(uid)
 
@@ -539,17 +562,52 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       const now = admin.firestore.FieldValue.serverTimestamp()
       const certRef = db.collection('certificates').doc(serial)
       const historyRef = certRef.collection('history').doc()
+ 
+    /* ---------- TEMPLATE VALIDATION ---------- */
+let template = 'minimal' // safe default
+
+if (typeof data.template === 'string' && ALL_TEMPLATES.includes(data.template)) {
+  template = data.template
+}
+
+// Prevent Pro template usage by free users
+if (PRO_TEMPLATES.includes(template)) {
+  const isPro = userSnap.get('pro') === true
+  if (!isPro) {
+    throw new Error('PRO_TEMPLATE_NOT_ALLOWED')
+  }
+}
 
       const payload = {
-        ...data,
-        ownerUid: uid,
-        serial,
-        status: 'valid',
-        visibility: 'public',
-        immutable: true,
-        createdAt: now,
-        reserved: false
-      }
+  recipientName: String(data.recipientName || '').trim(),
+  courseTitle: String(data.courseTitle || '').trim(),
+  issueDate: data.issueDate || null,
+  issuerName: data.issuerName || null,
+  issuerPosition: data.issuerPosition || null,
+  issuerName2: data.issuerName2 || null,
+  issuerPosition2: data.issuerPosition2 || null,
+  orgName: String(data.orgName || '').trim(),
+
+  logoDataUrl: data.logoDataUrl || null,
+  sigDataUrl: data.sigDataUrl || null,
+  sigDataUrl2: data.sigDataUrl2 || null,
+
+  template,
+  accentColor: data.accentColor || '#CFAE49',
+  titleText: data.titleText || 'Certificate',
+
+  brand: data.brand || {},
+  i18n: data.i18n || {},
+
+  ownerUid: uid,
+  serial,
+  status: 'valid',
+  visibility: 'public',
+  immutable: true,
+  createdAt: now,
+  reserved: false
+}
+
 
       // Writes
       tx.set(certRef, payload, { merge: true })
@@ -560,14 +618,14 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
         source: 'api'
       })
     
-      
-// Commit confirmation log 
-console.log("ISSUE CERT TX COMMIT:", { uid, serial })
-
+  
       return { serial }
     })
 
     const site = clean(PUBLIC_SITE_URL)
+    
+// Safe post-transaction log
+console.log("ISSUED CERT:", { uid, serial: result.serial })
 
     return res.json({
       ok: true,
@@ -633,15 +691,25 @@ app.post(
 
         // Generate all serials (READ ONLY)
         const serials = []
-        while (serials.length < count) {
-          const s = generateSerial()
-          const certRef = db.collection('certificates').doc(s)
-          const snap = await tx.get(certRef) // READ
+let attempts = 0
+const MAX_ATTEMPTS = count * 10 // safety cap
 
-          if (!snap.exists) {
-            serials.push(s)
-          }
-        }
+while (serials.length < count && attempts < MAX_ATTEMPTS) {
+  attempts++
+
+  const s = generateSerial()
+  const certRef = db.collection('certificates').doc(s)
+  const snap = await tx.get(certRef)
+
+  if (!snap.exists && !serials.includes(s)) {
+    serials.push(s)
+  }
+}
+
+if (serials.length < count) {
+  throw new Error('SERIAL_GENERATION_FAILED')
+}
+
 
         /* ---------- WRITE PHASE ---------- */
         const quotaResult = await checkAndConsumeQuotaTx(tx, uid, count)
@@ -691,7 +759,12 @@ app.post(
       if (e.message === 'PRO_REQUIRED') {
         return res.status(403).json({ ok: false, error: 'Pro plan required' })
       }
-
+    if (e.message === 'SERIAL_GENERATION_FAILED') {
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to generate unique serials. Please retry.'
+    })
+  }
       if (e.message?.toLowerCase().includes('limit')) {
         return res.status(429).json({ ok: false, error: e.message })
       }
@@ -1013,7 +1086,10 @@ async function handlePesaNotification(params, res) {
       { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
     )
 
-    const paid = Number(status?.status_code) === 1
+    const paid = Number(status?.status_code) === 1 &&
+             String(status?.payment_status_description || '')
+               .toLowerCase()
+               .includes('completed')
     const mr = String(status?.merchant_reference || "")
     let uid = null
     let planId = null
@@ -1217,6 +1293,12 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
     res.status(500).json({ ok: false, error: e?.message || String(e) })
   }
 })
+
+app.use((err, req, res, next) => {
+  console.error('UNHANDLED ERROR:', err)
+  res.status(500).json({ ok: false, error: 'Internal server error' })
+})
+
 
 /* ============== Start ============== */
 app.listen(PORT, () => {
