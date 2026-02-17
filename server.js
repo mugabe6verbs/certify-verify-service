@@ -581,6 +581,10 @@ if (PRO_TEMPLATES.includes(template)) {
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
   courseTitle: String(data.courseTitle || '').trim(),
+  achievementText: data.achievementText || null,
+  externalId: data.externalId || null,
+  expiryDate: data.expiryDate || null,
+  customNote: data.customNote || null,     
   issueDate: data.issueDate || null,
   issuerName: data.issuerName || null,
   issuerPosition: data.issuerPosition || null,
@@ -591,7 +595,8 @@ if (PRO_TEMPLATES.includes(template)) {
   logoDataUrl: data.logoDataUrl || null,
   sigDataUrl: data.sigDataUrl || null,
   sigDataUrl2: data.sigDataUrl2 || null,
-
+  photoDataUrl: data.photoDataUrl || null,
+  sealDataUrl: data.sealDataUrl || null,
   template,
   accentColor: data.accentColor || '#CFAE49',
   titleText: data.titleText || 'Certificate',
@@ -1306,6 +1311,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
