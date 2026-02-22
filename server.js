@@ -409,8 +409,8 @@ async function authenticate(req, res, next) {
 
 
 /* ============== Health & Debug (protected) ============== */
-app.get(['/health','/api/health'], (_req, res) => {
-  res.json({ ok: true, projectId: FIREBASE_PROJECT_ID || null, hasFirebaseCreds: !!hasFirebaseCreds })
+  app.get(['/health','/api/health'], (_req, res) => {
+  res.json({ ok: true })
 })
 
 app.get('/pesapal/health', async (req, res) => {
@@ -475,7 +475,10 @@ async function isManualProEnabled() {
     return !!(snap.exists && snap.get('allowManualPro') === true)
   } catch { return false }
 }
-app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
+  app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ ok: false })
+  }
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
     const { idToken } = req.body || {}
@@ -584,7 +587,7 @@ if (PRO_TEMPLATES.includes(template)) {
   achievementText: data.achievementText || null,
   externalId: data.externalId || null,
   expiryDate: data.expiryDate || null,
-  customNote: data.customNote || null,     
+  customNote: data.customNote || null,
   issueDate: data.issueDate || null,
   issuerName: data.issuerName || null,
   issuerPosition: data.issuerPosition || null,
@@ -595,8 +598,10 @@ if (PRO_TEMPLATES.includes(template)) {
   logoDataUrl: data.logoDataUrl || null,
   sigDataUrl: data.sigDataUrl || null,
   sigDataUrl2: data.sigDataUrl2 || null,
-  photoDataUrl: data.photoDataUrl || null,
+  
+   photoDataUrl: data.photoDataUrl || null,
   sealDataUrl: data.sealDataUrl || null,
+
   template,
   accentColor: data.accentColor || '#CFAE49',
   titleText: data.titleText || 'Certificate',
@@ -876,7 +881,7 @@ await userRef.set(
 )
 
 
-    // 🔍 AUDIT LOG (immutable, attributed)
+    //  AUDIT LOG (immutable, attributed)
     await logAdminAction({
       action: "set_pro",
       adminUid: adminUser.uid,
@@ -971,7 +976,7 @@ async function subscribeHandler(req, res) {
       origin: req.headers.origin,
       path: req.originalUrl,
     })
-    // 🔒 HARD BLOCK: never allow anonymous users to create orders
+    //  HARD BLOCK: never allow anonymous users to create orders
 if (req.user.firebase?.sign_in_provider === 'anonymous') {
   return res.status(403).json({
     ok: false,
@@ -1110,7 +1115,7 @@ async function handlePesaNotification(params, res) {
 
 
    if (paid && (!uid || uid.startsWith("monthly_"))) {
-   console.error("🚨 IPN: Paid order but invalid UID resolution", { mr, uid })
+   console.error(" IPN: Paid order but invalid UID resolution", { mr, uid })
    return res.status(500).json({ ok: false, error: "UID resolution failed" })
    }
 
@@ -1135,7 +1140,7 @@ async function handlePesaNotification(params, res) {
         const userRef = db.collection("users").doc(uid)
         const userSnap = await userRef.get()
 
-        // ⚠ If user profile doesn't exist yet, create a minimal one (race-proof)
+        //  If user profile doesn't exist yet, create a minimal one (race-proof)
         if (!userSnap.exists) {
           console.warn("⚠ Creating minimal user profile for paid order:", uid)
 
@@ -1163,7 +1168,7 @@ async function handlePesaNotification(params, res) {
 const proUntil = addInterval(base, interval)
 
 
-        // 🔒 Server is source of truth — always apply upgrade for paid orders
+        //  Server is source of truth — always apply upgrade for paid orders
         await userRef.set(
           {
             pro: true,
@@ -1224,7 +1229,10 @@ app.post("/pesapal/ipn", ipnLimiter, (req, res) =>
 )
 
 /* ============== Admin Verification (break-glass) ============== */
-app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
+ app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ ok: false })
+  }
 
   const { idToken, password } = req.body || {}
   if (!idToken || password !== ADMIN_PASSWORD) {
@@ -1238,6 +1246,7 @@ app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
 
   res.json({ ok: true })
 })
+
 
 /* ============== Org custom domain verification (secured) ============== */
 
@@ -1311,7 +1320,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
 
 
 
