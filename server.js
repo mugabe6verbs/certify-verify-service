@@ -529,6 +529,17 @@ if (
     const result = await db.runTransaction(async (tx) => {
       /* ---------- READ PHASE ---------- */
       const userSnap = await tx.get(userRef)
+      const userData = userSnap.data() || {}
+      const orgId = userData.orgId || uid
+
+      const orgRef = db.collection('orgs').doc(orgId)
+      const orgSnap = await tx.get(orgRef)
+
+   if (!orgSnap.exists) {
+  throw new Error('ORG_NOT_FOUND')
+   }
+
+     const orgData = orgSnap.data() || {}
 
       // Pro check
       if (!userSnap.exists || userSnap.get('pro') !== true) {
@@ -593,7 +604,7 @@ if (PRO_TEMPLATES.includes(template)) {
   issuerPosition: data.issuerPosition || null,
   issuerName2: data.issuerName2 || null,
   issuerPosition2: data.issuerPosition2 || null,
-  orgName: String(data.orgName || '').trim(),
+  orgId,orgName: String(orgData.name || '').trim(),
 
   logoDataUrl: data.logoDataUrl || null,
   sigDataUrl: data.sigDataUrl || null,
@@ -632,7 +643,20 @@ if (PRO_TEMPLATES.includes(template)) {
       return { serial }
     })
 
-    const site = clean(PUBLIC_SITE_URL)
+    const orgSnap = await db.collection('orgs').doc(
+  (await db.collection('users').doc(uid).get()).data()?.orgId || uid
+).get()
+
+const orgData = orgSnap.exists ? orgSnap.data() : null
+
+let baseDomain = clean(PUBLIC_SITE_URL)
+
+if (
+  orgData?.customVerifyDomain &&
+  orgData?.domainVerified === true
+) {
+  baseDomain = `https://${orgData.customVerifyDomain}`
+}
     
 // Safe post-transaction log
 console.log("ISSUED CERT:", { uid, serial: result.serial })
@@ -640,7 +664,7 @@ console.log("ISSUED CERT:", { uid, serial: result.serial })
     return res.json({
       ok: true,
       serial: result.serial,
-      verifyUrl: `${site}/verify/${result.serial}`
+      verifyUrl: `${baseDomain}/verify/${result.serial}`
     })
 
   } catch (e) {
@@ -1275,7 +1299,7 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
       return res.status(403).json({ ok: false, error: 'Forbidden: you do not own this organization' })
     }
 
-    const domain = orgData.customDomain
+    const domain = orgData.customVerifyDomain
     if (!domain) return res.status(400).json({ ok: false, error: 'No custom domain set for this org' })
 
     // Attempt CNAME lookup then TXT fallback
