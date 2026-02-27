@@ -808,6 +808,147 @@ if (serials.length < count) {
   }
 )
 
+/* ============== CERTIFICATE REVOKE ============== */
+app.post('/api/certificates/revoke', authenticate, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
+    }
+
+    const uid = req.user?.uid
+    const { serial, reason } = req.body || {}
+
+    if (!serial) {
+      return res.status(400).json({ ok: false, error: 'Missing serial' })
+    }
+
+    const certRef = db.collection('certificates').doc(String(serial))
+
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(certRef)
+
+      if (!snap.exists) {
+        throw new Error('NOT_FOUND')
+      }
+
+      const cert = snap.data()
+
+      // Ownership enforcement
+      if (cert.ownerUid !== uid) {
+        throw new Error('FORBIDDEN')
+      }
+
+      // Prevent double revoke
+      if (cert.status === 'revoked') {
+        throw new Error('ALREADY_REVOKED')
+      }
+
+      const now = admin.firestore.FieldValue.serverTimestamp()
+
+      tx.update(certRef, {
+        status: 'revoked',
+        revokeReason: reason || 'Revoked by issuer',
+        revokedAt: now,
+        revokedBy: uid,
+      })
+
+      tx.set(certRef.collection('history').doc(), {
+        action: 'revoked',
+        by: uid,
+        reason: reason || 'Revoked by issuer',
+        at: now,
+        source: 'api'
+      })
+    })
+
+    return res.json({ ok: true })
+
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') {
+      return res.status(404).json({ ok: false, error: 'Certificate not found' })
+    }
+    if (e.message === 'FORBIDDEN') {
+      return res.status(403).json({ ok: false, error: 'Not allowed' })
+    }
+    if (e.message === 'ALREADY_REVOKED') {
+      return res.status(400).json({ ok: false, error: 'Already revoked' })
+    }
+
+    console.error('REVOKE ERROR', e)
+    return res.status(500).json({ ok: false, error: 'Server error' })
+  }
+})
+
+/* ============== CERTIFICATE RESTORE ============== */
+app.post('/api/certificates/restore', authenticate, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
+    }
+
+    const uid = req.user?.uid
+    const { serial } = req.body || {}
+
+    if (!serial) {
+      return res.status(400).json({ ok: false, error: 'Missing serial' })
+    }
+
+    const certRef = db.collection('certificates').doc(String(serial))
+
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(certRef)
+
+      if (!snap.exists) {
+        throw new Error('NOT_FOUND')
+      }
+
+      const cert = snap.data()
+
+      if (cert.ownerUid !== uid) {
+        throw new Error('FORBIDDEN')
+      }
+
+      if (cert.status !== 'revoked') {
+        throw new Error('NOT_REVOKED')
+      }
+
+      const now = admin.firestore.FieldValue.serverTimestamp()
+
+      tx.update(certRef, {
+        status: 'valid',
+        revokeReason: null,
+        revokedAt: null,
+        revokedBy: null,
+        restoredAt: now,
+        restoredBy: uid,
+      })
+
+      tx.set(certRef.collection('history').doc(), {
+        action: 'restored',
+        by: uid,
+        at: now,
+        source: 'api'
+      })
+    })
+
+    return res.json({ ok: true })
+
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') {
+      return res.status(404).json({ ok: false, error: 'Certificate not found' })
+    }
+    if (e.message === 'FORBIDDEN') {
+      return res.status(403).json({ ok: false, error: 'Not allowed' })
+    }
+    if (e.message === 'NOT_REVOKED') {
+      return res.status(400).json({ ok: false, error: 'Certificate is not revoked' })
+    }
+
+    console.error('RESTORE ERROR', e)
+    return res.status(500).json({ ok: false, error: 'Server error' })
+  }
+})
+
 
 /* ============== Admin rescue ============== */
 
@@ -1344,6 +1485,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
