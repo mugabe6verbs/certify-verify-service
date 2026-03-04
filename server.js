@@ -6,8 +6,7 @@ import dns from 'dns/promises'
 import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
-
-
+import crypto from 'crypto'
 
 const {
   PORT = 8080,
@@ -52,16 +51,46 @@ function normalizeCountryCode(input) {
   const cc = String(input).trim().toUpperCase()
   return /^[A-Z]{2}$/.test(cc) ? cc : null
 }
-
 function generateSerial() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  const part = () =>
-    Array.from({ length: 4 }, () =>
-      chars[Math.floor(Math.random() * chars.length)]
-    ).join('')
-  return `${part()}-${part()}-${part()}`
+  const bytes = crypto.randomBytes(12)
+
+  let serial = ''
+
+  for (let i = 0; i < 12; i++) {
+    serial += chars[bytes[i] % chars.length]
+
+    if (i === 3 || i === 7) {
+      serial += '-'
+    }
+  }
+
+  return serial
 }
 
+function normalizeDomain(input) {
+  if (!input) return null
+
+  let d = String(input).trim().toLowerCase()
+
+  d = d.replace(/^https?:\/\//, '')
+  d = d.replace(/\/+$/, '')
+
+  return d
+}
+
+function validateDataUrlSize(dataUrl, maxBytes = 300000) {
+  if (!dataUrl) return true
+  if (typeof dataUrl !== 'string') return false
+
+  const parts = dataUrl.split(',')
+  if (parts.length !== 2) return false
+
+  const base64 = parts[1]
+  const size = Buffer.byteLength(base64, 'base64')
+
+  return size <= maxBytes
+}
 
 /* ============== Firebase Admin ============== */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
@@ -88,14 +117,12 @@ const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 't
 
 /* ============== Pricing (USD) ============== */
 const CURRENCY = process.env.PESA_CURRENCY || 'KES'
-const AMOUNT_BY_PLAN = { pro_monthly: 19, pro_yearly: 190 }
+const AMOUNT_BY_PLAN = { pro_monthly: 29, pro_yearly: 290 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
 function amountToPlanId(amount) {
   const a = Number(amount)
-
-  if (Math.abs(a - 19) < 0.01) return 'pro_monthly'
-  if (Math.abs(a - 190) < 0.01) return 'pro_yearly'
-
+if (Math.abs(a - 29) < 0.01)
+if (Math.abs(a - 290) < 0.01)
   return null
 }
 
@@ -104,6 +131,8 @@ function addInterval(ms, interval) {
   if (interval === 'year') d.setUTCFullYear(d.getUTCFullYear() + 1)
   else d.setUTCMonth(d.getUTCMonth() + 1)
   return d.getTime()
+
+  
 }
 // ================= QUOTA HELPERS  =================
 
@@ -366,7 +395,7 @@ app.use(compression())
 app.use(express.json({ limit: '2mb' }))
 
 /* ============== Rate limiters ============== */
-const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
+const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false })
 const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
 const ipnLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false })
 app.use('/api', globalLimiter)
@@ -385,6 +414,12 @@ const bulkLimiter = rateLimit({
   legacyHeaders: false
 })
 
+const verifyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false
+})
 
 /* ======================================================
    AUTH
@@ -513,6 +548,19 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
 const data = req.body || {}
+// Validate image payload sizes
+if (
+  !validateDataUrlSize(data.logoDataUrl) ||
+  !validateDataUrlSize(data.sigDataUrl) ||
+  !validateDataUrlSize(data.sigDataUrl2) ||
+  !validateDataUrlSize(data.photoDataUrl) ||
+  !validateDataUrlSize(data.sealDataUrl)
+) {
+  return res.status(400).json({
+    ok: false,
+    error: 'One or more images exceed allowed size limit'
+  })
+}
 
 // Stronger payload guard (prevents empty or whitespace values)
 if (
@@ -540,7 +588,7 @@ if (
    }
 
      const orgData = orgSnap.data() || {}
-
+    
       // Pro check
       if (!userSnap.exists || userSnap.get('pro') !== true) {
         throw new Error('PRO_REQUIRED')
@@ -562,6 +610,19 @@ if (
       if (!serial) {
         throw new Error('SERIAL_GENERATION_FAILED')
       }
+     
+       // Determine verification domain at issuance time (LOCKED)
+let domainUsed = clean(PUBLIC_SITE_URL)
+
+if (
+  orgData?.customVerifyDomain &&
+  orgData?.domainVerified === true
+) {
+  domainUsed = orgData.customVerifyDomain
+}
+
+// Build verification URL (LOCKED FOREVER)
+const verifyUrl = `https://${domainUsed}/verify/${serial}`
 
       /* ---------- WRITE PHASE ---------- */
       const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
@@ -622,6 +683,8 @@ if (PRO_TEMPLATES.includes(template)) {
 
   ownerUid: uid,
   serial,
+  verificationDomain: domainUsed,
+  verifyUrl,
   status: 'valid',
   visibility: 'public',
   immutable: true,
@@ -633,39 +696,26 @@ if (PRO_TEMPLATES.includes(template)) {
       // Writes
       tx.set(certRef, payload, { merge: true })
       tx.set(historyRef, {
-        action: 'issued',
-        by: uid,
-        at: now,
-        source: 'api'
-      })
+  action: 'issued',
+  by: uid,
+  at: now,
+  source: 'api',
+  ip: req.ip
+})
     
-  
-      return { serial }
+  return { serial, verifyUrl }
     })
 
-    const orgSnap = await db.collection('orgs').doc(
-  (await db.collection('users').doc(uid).get()).data()?.orgId || uid
-).get()
-
-const orgData = orgSnap.exists ? orgSnap.data() : null
-
-let baseDomain = clean(PUBLIC_SITE_URL)
-
-if (
-  orgData?.customVerifyDomain &&
-  orgData?.domainVerified === true
-) {
-  baseDomain = `https://${orgData.customVerifyDomain}`
-}
+   
     
 // Safe post-transaction log
 console.log("ISSUED CERT:", { uid, serial: result.serial })
 
     return res.json({
-      ok: true,
-      serial: result.serial,
-      verifyUrl: `${baseDomain}/verify/${result.serial}`
-    })
+  ok: true,
+  serial: result.serial,
+  verifyUrl: result.verifyUrl
+})
 
   } catch (e) {
     console.error('ISSUE CERT ERROR', e)
@@ -818,11 +868,15 @@ app.post('/api/certificates/revoke', authenticate, async (req, res) => {
     const uid = req.user?.uid
     const { serial, reason } = req.body || {}
 
-    if (!serial) {
-      return res.status(400).json({ ok: false, error: 'Missing serial' })
-    }
+    const SERIAL_RE = /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
 
-    const certRef = db.collection('certificates').doc(String(serial))
+    const normalizedSerial = String(serial || '').toUpperCase()
+
+    if (!SERIAL_RE.test(normalizedSerial)) {
+    return res.status(400).json({ ok: false, error: 'Invalid serial format' })
+   }
+
+     const certRef = db.collection('certificates').doc(normalizedSerial)
 
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(certRef)
@@ -851,13 +905,13 @@ app.post('/api/certificates/revoke', authenticate, async (req, res) => {
         revokedAt: now,
         revokedBy: uid,
       })
-
-      tx.set(certRef.collection('history').doc(), {
-        action: 'revoked',
-        by: uid,
-        reason: reason || 'Revoked by issuer',
-        at: now,
-        source: 'api'
+       tx.set(certRef.collection('history').doc(), {
+       action: 'revoked',
+       by: uid,
+       reason: reason || 'Revoked by issuer',
+       at: now,
+       source: 'api',
+       ip: req.ip
       })
     })
 
@@ -889,12 +943,15 @@ app.post('/api/certificates/restore', authenticate, async (req, res) => {
     const uid = req.user?.uid
     const { serial } = req.body || {}
 
-    if (!serial) {
-      return res.status(400).json({ ok: false, error: 'Missing serial' })
-    }
+    const SERIAL_RE = /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
 
-    const certRef = db.collection('certificates').doc(String(serial))
+    const normalizedSerial = String(serial || '').toUpperCase()
 
+   if (!SERIAL_RE.test(normalizedSerial)) {
+  return res.status(400).json({ ok: false, error: 'Invalid serial format' })
+   }
+
+    const certRef = db.collection('certificates').doc(normalizedSerial)
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(certRef)
 
@@ -923,11 +980,12 @@ app.post('/api/certificates/restore', authenticate, async (req, res) => {
         restoredBy: uid,
       })
 
-      tx.set(certRef.collection('history').doc(), {
+        tx.set(certRef.collection('history').doc(), {
         action: 'restored',
         by: uid,
         at: now,
-        source: 'api'
+        source: 'api',
+        ip: req.ip
       })
     })
 
@@ -949,6 +1007,100 @@ app.post('/api/certificates/restore', authenticate, async (req, res) => {
   }
 })
 
+/* ============== VERIFICATION ============== */
+
+app.get('/verify/:serial', verifyLimiter, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false })
+    }
+
+    const rawSerial = String(req.params.serial || '').toUpperCase()
+
+    const SERIAL_RE = /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
+
+    if (!SERIAL_RE.test(rawSerial)) {
+      return res.status(400).json({ ok: false, error: 'Invalid format' })
+    }
+
+    const certRef = db.collection('certificates').doc(rawSerial)
+    const snap = await certRef.get()
+
+    if (!snap.exists) {
+      // Uniform response to avoid enumeration timing leaks
+      return res.status(404).json({ ok: false })
+    }
+
+    const cert = snap.data()
+
+    // Block archived
+    if (cert.status === 'archived') {
+      return res.status(404).json({ ok: false })
+    }
+    
+    // Block private certificates from public verification
+if (cert.visibility === 'private') {
+  return res.status(404).json({ ok: false })
+}
+    // Fetch org for domain enforcement
+    let orgData = null
+    if (cert.orgId) {
+      const orgSnap = await db.collection('orgs').doc(cert.orgId).get()
+      if (orgSnap.exists) {
+        orgData = orgSnap.data()
+      }
+    }
+
+    //  Domain binding enforcement
+    if (
+      orgData?.customVerifyDomain &&
+      orgData?.domainVerified === true
+    ) {
+      const requestHost = req.hostname.toLowerCase()
+      const expectedHost = orgData.customVerifyDomain.toLowerCase()
+
+      if (requestHost !== expectedHost) {
+        return res.status(403).json({ ok: false })
+      }
+    }
+
+    //  Log verification server-side
+    await db.collection('verificationLogs').add({
+      serial: rawSerial,
+      orgId: cert.orgId || null,
+      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      ip: req.ip,
+      ua: req.headers['user-agent'] || null
+    })
+
+    //  Return only public-safe fields
+    const publicPayload = {
+      serial: cert.serial,
+      recipientName: cert.recipientName,
+      courseTitle: cert.courseTitle,
+      orgName: cert.orgName,
+      issueDate: cert.issueDate,
+      expiryDate: cert.expiryDate || null,
+      status: cert.status,
+      revokeReason: cert.revokeReason || null,
+      revokedAt: cert.revokedAt || null,
+      createdAt: cert.createdAt || null,
+      template: cert.template,
+      brand: {
+      primaryColor: cert.brand?.primaryColor || null,
+      secondaryColor: cert.brand?.secondaryColor || null,
+      logoDataUrl: cert.brand?.logoDataUrl || null
+   },
+     visibility: cert.visibility
+}
+
+    return res.json({ ok: true, certificate: publicPayload })
+
+  } catch (e) {
+    console.error('VERIFY ERROR', e)
+    return res.status(500).json({ ok: false })
+  }
+})
 
 /* ============== Admin rescue ============== */
 
@@ -1439,8 +1591,37 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
     if (orgData.ownerUid !== req.user.uid) {
       return res.status(403).json({ ok: false, error: 'Forbidden: you do not own this organization' })
     }
+   const rawDomain = orgData.customVerifyDomain
+const domain = normalizeDomain(rawDomain)
 
-    const domain = orgData.customVerifyDomain
+if (!domain) {
+  return res.status(400).json({ ok: false, error: 'No custom domain set for this org' })
+}
+
+//  Prevent domain change if already verified
+if (
+  orgData.domainVerified === true &&
+  orgData.customVerifyDomain &&
+  normalizeDomain(orgData.customVerifyDomain) !== domain
+) {
+  return res.status(400).json({
+    ok: false,
+    error: 'Domain is locked. Remove verification before changing domain.'
+  })
+}
+
+   //  Prevent domain reuse across organizations
+  const existing = await db
+  .collection('orgs')
+  .where('customVerifyDomain', '==', domain)
+  .get()
+
+  if (!existing.empty && existing.docs[0].id !== orgId) {
+  return res.status(400).json({
+    ok: false,
+    error: 'Domain already in use by another organization'
+  })
+ }
     if (!domain) return res.status(400).json({ ok: false, error: 'No custom domain set for this org' })
 
     // Attempt CNAME lookup then TXT fallback
@@ -1465,7 +1646,11 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
   }
 }
 
- await db.collection('orgs').doc(orgId).set({ domainVerified: verified }, { merge: true })
+   await db.collection('orgs').doc(orgId).set({
+  customVerifyDomain: domain,
+  domainVerified: verified,
+  domainVerifiedAt: verified ? admin.firestore.FieldValue.serverTimestamp() : null
+}, { merge: true })
     res.json({ ok: true, domain, verified, cnames })
 
   } catch (e) {
