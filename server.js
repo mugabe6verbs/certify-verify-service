@@ -229,7 +229,7 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
     return { ok: false, reason: "monthly", limit: limits.monthly }
   }
 
-  // 🔥 Atomic, nested, race-safe increment
+  //  Atomic, nested, race-safe increment
   tx.set(
     userRef,
     {
@@ -250,18 +250,20 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
 }
 
 
+
 /* ============== Billing Reconcile Helper ============== */
 async function reconcileForUser(uid) {
   if (!db) throw new Error("DB not available")
 
   // Find latest paid subscription order
   const snap = await db
-    .collection("orders")
-    .where("uid", "==", uid)
-    .where("status", "==", "paid")
-    .orderBy("paidAt", "desc")
-    .limit(1)
-    .get()
+  .collection("orders")
+  .where("uid", "==", uid)
+  .where("status", "==", "paid")
+  .where("reconciled", "==", false)
+  .orderBy("paidAt", "desc")
+  .limit(1)
+  .get()
 
   if (snap.empty) {
     return { ok: true, reconciled: false, reason: "no_paid_orders" }
@@ -274,19 +276,28 @@ async function reconcileForUser(uid) {
     order.planId || amountToPlanId(order.amount) || "pro_monthly"
 
   const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-const userRef = db.collection("users").doc(uid)
-const userSnap = await userRef.get()
+  const userRef = db.collection("users").doc(uid)
+  const userSnap = await userRef.get()
+  const now = Date.now()
+  const existingProUntil = Number(userSnap.get("proUntil") || 0)
 
-if (!userSnap.exists) {
+ if (existingProUntil > now) {
+  return {
+    ok: true,
+    reconciled: false,
+    reason: "subscription_already_active",
+  }
+ }
+ if (!userSnap.exists) {
   return { ok: false, reconciled: false, reason: "user_missing" }
-}
+ }
 
-const base = Math.max(
+ const base = Math.max(
   Date.now(),
   Number(userSnap.get("proUntil") || 0)
-)
+ )
 
-const proUntil = addInterval(base, interval)
+ const proUntil = addInterval(base, interval)
 
 
   // Idempotent upgrade (safe to run multiple times)
@@ -304,7 +315,10 @@ const proUntil = addInterval(base, interval)
     },
     { merge: true }
   )
-
+ await orderDoc.ref.update({
+  reconciled: true,
+  reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
+})
   return {
     ok: true,
     reconciled: true,
@@ -312,6 +326,7 @@ const proUntil = addInterval(base, interval)
     orderId: orderDoc.id,
   }
 }
+
 
 
 /* ============== Pesapal config ============== */
@@ -1670,6 +1685,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
