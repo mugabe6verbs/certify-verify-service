@@ -119,10 +119,18 @@ const ALLOW_MANUAL_PRO_ENV = String(ALLOW_MANUAL_PRO || '').toLowerCase() === 't
 const CURRENCY = process.env.PESA_CURRENCY || 'KES'
 const AMOUNT_BY_PLAN = { pro_monthly: 29, pro_yearly: 290 }
 const INTERVAL_BY_PLAN = { pro_monthly: 'month', pro_yearly: 'year' }
+
 function amountToPlanId(amount) {
   const a = Number(amount)
-if (Math.abs(a - 29) < 0.01)
-if (Math.abs(a - 290) < 0.01)
+
+  if (Math.abs(a - 29) < 0.01) {
+    return "pro_monthly"
+  }
+
+  if (Math.abs(a - 290) < 0.01) {
+    return "pro_yearly"
+  }
+
   return null
 }
 
@@ -166,6 +174,7 @@ const PLAN_LIMITS = {
   free:        { monthly: 10,  daily: 5   },
   pro_monthly:{ monthly: 300, daily: 100 },
   pro_yearly: { monthly: 1000,daily: 300 },
+  pro_admin: { monthly: 100000, daily: 10000 },
   pro:        { monthly: 300, daily: 100 } // fallback
 }
 
@@ -250,9 +259,8 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
 }
 
 
-
 /* ============== Billing Reconcile Helper ============== */
-async function reconcileForUser(uid) {
+ async function reconcileForUser(uid) {
   if (!db) throw new Error("DB not available")
 
   // Find latest paid subscription order
@@ -318,30 +326,29 @@ async function reconcileForUser(uid) {
  await orderDoc.ref.update({
   reconciled: true,
   reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
-})
+ })
   return {
     ok: true,
     reconciled: true,
     planId: finalPlanId,
     orderId: orderDoc.id,
   }
-}
+ }
 
 
-
-/* ============== Pesapal config ============== */
-const PESA_KEY    = clean(PESA_CONSUMER_KEY)
-const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
-const PESA_MODE   = (PESA_BASE || 'auto').toLowerCase()
-const PESA_URLS   = {
+ /* ============== Pesapal config ============== */
+ const PESA_KEY    = clean(PESA_CONSUMER_KEY)
+ const PESA_SECRET = clean(PESA_CONSUMER_SECRET)
+ const PESA_MODE   = (PESA_BASE || 'auto').toLowerCase()
+ const PESA_URLS   = {
   demo: 'https://cybqa.pesapal.com/pesapalv3',
   live: 'https://pay.pesapal.com/v3'
-}
-function isInvalidKeyErr(e) {
+ }
+  function isInvalidKeyErr(e) {
   const code = e?.response?.data?.error?.code || ''
   return String(code).toLowerCase().includes('invalid_consumer_key_or_secret_provided')
-}
-async function tokenFor(base) {
+ }
+ async function tokenFor(base) {
   const url = PESA_URLS[base]
   const { data } = await axios.post(
     `${url}/api/Auth/RequestToken`,
@@ -350,8 +357,8 @@ async function tokenFor(base) {
   )
   if (!data?.token) throw new Error(`No token in Pesapal token response: ${JSON.stringify(data)}`)
   return { token: data.token, base, url }
-}
-async function pesaToken(preferred = PESA_MODE) {
+ }
+ async function pesaToken(preferred = PESA_MODE) {
   if (!PESA_KEY || !PESA_SECRET) throw new Error('Missing PESA_CONSUMER_KEY/SECRET')
   const order = (preferred === 'auto') ? ['demo','live'] : [preferred, preferred === 'demo' ? 'live' : 'demo']
   let lastErr = null
@@ -364,24 +371,24 @@ async function pesaToken(preferred = PESA_MODE) {
     }
   }
   throw lastErr
-}
+ }
 
-/* ============== App / CORS / Middleware ============== */
-const app = express()
-app.use((req, res, next) => {
+  /* ============== App / CORS / Middleware ============== */
+ const app = express()
+ app.use((req, res, next) => {
   res.setTimeout(15000, () => {
     res.status(503).json({ ok: false, error: 'Request timeout' })
   })
   next()
-})
-app.set('trust proxy', 1)
+ })
+ app.set('trust proxy', 1)
 
-const allowList = (ALLOW_ORIGINS || '')
+ const allowList = (ALLOW_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
 
-const corsOptions = {
+ const corsOptions = {
   origin(origin, cb) {
     
     if (!origin) return cb(null, true) // server-to-server, redirects
@@ -398,72 +405,81 @@ const corsOptions = {
   ],
   credentials: true,
   optionsSuccessStatus: 204,
-}
+ }
 
-app.use(cors(corsOptions))
-app.options('*', cors(corsOptions))
+ app.use(cors(corsOptions))
+ app.options('*', cors(corsOptions))
 
-app.use(helmet())
-app.disable('x-powered-by')
+ app.use(helmet())
+ app.disable('x-powered-by')
 
-app.use(compression())
-app.use(express.json({ limit: '2mb' }))
+ app.use(compression())
+ app.use(express.json({ limit: '2mb', strict: true}))
 
-/* ============== Rate limiters ============== */
-const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false })
-const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
-const ipnLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false })
-app.use('/api', globalLimiter)
+ /* ============== Rate limiters ============== */
+ const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false })
+ const pesapalLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false })
+ const ipnLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false })
 
-const adminVerifyLimiter = rateLimit({
+ app.use(globalLimiter)
+
+ const adminVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5,                  // 5 attempts per window
   standardHeaders: true,
   legacyHeaders: false
-})
+ })
 
-const bulkLimiter = rateLimit({
+  const bulkLimiter = rateLimit({
   windowMs: 60 * 1000,   // 1 minute
   max: 5,               // max 5 bulk batches per minute per user/IP
   standardHeaders: true,
   legacyHeaders: false
-})
+ })
 
-const verifyLimiter = rateLimit({
+ const verifyLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false
-})
+ })
 
-/* ======================================================
+ /* ======================================================
    AUTH
-====================================================== */
-async function verifyToken(req) {
+ ====================================================== */
+ async function verifyToken(req) {
   try {
-    const auth = req.headers.authorization || ""
-    if (!auth.startsWith("Bearer ")) return null
-    return await admin.auth().verifyIdToken(auth.slice(7), true)
+    const header = req.headers.authorization || ""
+
+    if (!header.startsWith("Bearer ")) return null
+
+    const token = header.slice(7).trim()
+    if (!token) return null
+
+    return await admin.auth().verifyIdToken(token, true)
   } catch {
     return null
   }
-}
-async function authenticate(req, res, next) {
+ }
+ async function authenticate(req, res, next) {
   const decoded = await verifyToken(req)
   if (!decoded) {
     return res.status(401).json({ ok: false, error: "Invalid or missing token" })
   }
+  if (decoded.disabled === true) {
+    return res.status(403).json({ ok: false, error: "User disabled" })
+  }
   req.user = decoded
   next()
-}
+ }
 
 
-/* ============== Health & Debug (protected) ============== */
+ /* ============== Health & Debug (protected) ============== */
   app.get(['/health','/api/health'], (_req, res) => {
   res.json({ ok: true })
-})
+ })
 
-app.get('/pesapal/health', async (req, res) => {
+ app.get('/pesapal/health', authenticate, async (req, res) => {
   try {
     const probe = String(req.query.probe || '') === '1'
     let baseResolved = null
@@ -475,13 +491,13 @@ app.get('/pesapal/health', async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
-})
+ })
 
 
 
-/* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
-const IS_PROD = process.env.NODE_ENV === 'production'
-app.get('/', async (req, res) => {
+ /* ============== Home page (info) - SECURED FOR PUBLIC ACCESS ============== */
+ const IS_PROD = process.env.NODE_ENV === 'production'
+ app.get('/', async (req, res) => {
   let decoded = null
 
   try {
@@ -513,18 +529,18 @@ app.get('/', async (req, res) => {
       <p><strong>Register IPN (admin only):</strong> <code>GET ${origin}/pesapal/registerIPN</code></p>
     </body></html>
   `)
-})
+ })
 
 
-/* ============== Manual Pro (dev/test) ============== */
-async function isManualProEnabled() {
+ /* ============== Manual Pro (dev/test) ============== */
+ async function isManualProEnabled() {
   if (ALLOW_MANUAL_PRO_ENV) return true
   if (!db) return false
   try {
     const snap = await db.collection('config').doc('flags').get()
     return !!(snap.exists && snap.get('allowManualPro') === true)
   } catch { return false }
-}
+ }
   app.post(['/manualPro','/api/manualPro','/admin/manualPro'], async (req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ ok: false })
@@ -532,6 +548,9 @@ async function isManualProEnabled() {
   try {
     if (!db) return res.status(500).json({ ok:false, error:'Server missing Firebase credentials' })
     const { idToken } = req.body || {}
+ if (typeof idToken !== "string") {
+  return res.status(400).json({ ok:false, error:"Invalid token" })
+ }
     if (!idToken) return res.status(400).json({ ok:false, error:'Missing idToken' })
     const decoded = await admin.auth().verifyIdToken(String(idToken), true)
     const uid = decoded.uid
@@ -547,12 +566,12 @@ async function isManualProEnabled() {
   } catch (e) {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
-})
+ })
 
-/* ============== CERTIFICATES ISSUE  ============== */
+ /* ============== CERTIFICATES ISSUE  ============== */
 
 
-app.post('/api/certificates/issue', authenticate, async (req, res) => {
+ app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
@@ -562,29 +581,29 @@ app.post('/api/certificates/issue', authenticate, async (req, res) => {
     if (!uid) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
-const data = req.body || {}
-// Validate image payload sizes
-if (
+ const data = req.body || {}
+ // Validate image payload sizes
+ if (
   !validateDataUrlSize(data.logoDataUrl) ||
   !validateDataUrlSize(data.sigDataUrl) ||
   !validateDataUrlSize(data.sigDataUrl2) ||
   !validateDataUrlSize(data.photoDataUrl) ||
   !validateDataUrlSize(data.sealDataUrl)
-) {
+ ) {
   return res.status(400).json({
     ok: false,
     error: 'One or more images exceed allowed size limit'
   })
-}
+ }
 
-// Stronger payload guard (prevents empty or whitespace values)
-if (
+ // Stronger payload guard (prevents empty or whitespace values)
+ if (
   !String(data.recipientName || '').trim() ||
   !String(data.courseTitle || '').trim() ||
-  !String(data.orgName || '').trim()
-) {
+  !String(orgData.name || '').trim()
+ ) {
   return res.status(400).json({ ok: false, error: 'Missing required fields' })
-}
+ }
 
 
     const userRef = db.collection('users').doc(uid)
@@ -593,6 +612,10 @@ if (
       /* ---------- READ PHASE ---------- */
       const userSnap = await tx.get(userRef)
       const userData = userSnap.data() || {}
+      
+      if (!userSnap.exists) {
+  throw new Error('PRO_REQUIRED')
+  }
       const orgId = userData.orgId || uid
 
       const orgRef = db.collection('orgs').doc(orgId)
@@ -605,39 +628,51 @@ if (
      const orgData = orgSnap.data() || {}
     
       // Pro check
-      if (!userSnap.exists || userSnap.get('pro') !== true) {
-        throw new Error('PRO_REQUIRED')
-      }
+  const rawProUntil = userData.proUntil
+
+ let proUntil = null
+
+ if (typeof rawProUntil === "number") {
+  proUntil = rawProUntil
+ } else if (rawProUntil?.toMillis) {
+  proUntil = rawProUntil.toMillis()
+ }
+
+ if (!proUntil || Date.now() >= proUntil) {
+  throw new Error("PRO_REQUIRED")
+ }
 
       // Generate unique serial (READ ONLY)
-      let serial = null
-      for (let i = 0; i < 5; i++) {
-        const trySerial = generateSerial()
-        const certRef = db.collection('certificates').doc(trySerial)
-        const snap = await tx.get(certRef) // READ
+ let serial = null
 
-        if (!snap.exists) {
-          serial = trySerial
-          break
-        }
-      }
+ for (let i = 0; i < 5; i++) {
+  const trySerial = generateSerial()
 
-      if (!serial) {
-        throw new Error('SERIAL_GENERATION_FAILED')
-      }
+  const lookupRef = db.collection('certificateLookup').doc(trySerial)
+  const snap = await tx.get(lookupRef)
+
+  if (!snap.exists) {
+    serial = trySerial
+    break
+  }
+ }
+
+ if (!serial) {
+  throw new Error('SERIAL_GENERATION_FAILED')
+ }
      
        // Determine verification domain at issuance time (LOCKED)
-let domainUsed = clean(PUBLIC_SITE_URL)
+ let domainUsed = clean(PUBLIC_SITE_URL)
 
-if (
+ if (
   orgData?.customVerifyDomain &&
   orgData?.domainVerified === true
-) {
+ ) {
   domainUsed = orgData.customVerifyDomain
-}
+ }
 
-// Build verification URL (LOCKED FOREVER)
-const verifyUrl = `https://${domainUsed}/verify/${serial}`
+ // Build verification URL (LOCKED FOREVER)
+ const verifyUrl = `https://${domainUsed}/verify/${serial}`
 
       /* ---------- WRITE PHASE ---------- */
       const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
@@ -650,23 +685,28 @@ const verifyUrl = `https://${domainUsed}/verify/${serial}`
       }
 
       const now = admin.firestore.FieldValue.serverTimestamp()
+      
       const certRef = db.collection('certificates').doc(serial)
+
+ const orgCertRef = db.collection('orgs').doc(orgId).collection('certificates').doc(serial)
+
+ const lookupRef = db.collection('certificateLookup').doc(serial)
       const historyRef = certRef.collection('history').doc()
  
     /* ---------- TEMPLATE VALIDATION ---------- */
-let template = 'minimal' // safe default
+ let template = 'minimal' // safe default
 
-if (typeof data.template === 'string' && ALL_TEMPLATES.includes(data.template)) {
+ if (typeof data.template === 'string' && ALL_TEMPLATES.includes(data.template)) {
   template = data.template
-}
+ }
 
 // Prevent Pro template usage by free users
 if (PRO_TEMPLATES.includes(template)) {
-  const isPro = userSnap.get('pro') === true
+  const isPro = proUntil && Date.now() < proUntil
   if (!isPro) {
     throw new Error('PRO_TEMPLATE_NOT_ALLOWED')
   }
-}
+ }
 
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
@@ -705,26 +745,40 @@ if (PRO_TEMPLATES.includes(template)) {
   immutable: true,
   createdAt: now,
   reserved: false
-}
+ }
 
 
       // Writes
-      tx.set(certRef, payload, { merge: true })
-      tx.set(historyRef, {
+      // Main certificate (legacy global collection)
+ tx.set(certRef, payload, { merge: true })
+
+ // Org-scoped certificate (fast org queries)
+ tx.set(orgCertRef, payload, { merge: true })
+
+ // Global serial registry
+ tx.set(lookupRef, {
+  serial,
+  orgId,
+  ownerUid: uid,
+  createdAt: now
+ })
+
+ // Issuance history
+ tx.set(historyRef, {
   action: 'issued',
   by: uid,
   at: now,
   source: 'api',
   ip: req.ip
-})
+ })
     
-  return { serial, verifyUrl }
+   return { serial, verifyUrl }
     })
 
    
     
-// Safe post-transaction log
-console.log("ISSUED CERT:", { uid, serial: result.serial })
+ // Safe post-transaction log
+ console.log("ISSUED CERT:", { uid, serial: result.serial })
 
     return res.json({
   ok: true,
@@ -782,23 +836,41 @@ app.post(
 
       const result = await db.runTransaction(async (tx) => {
         /* ---------- READ PHASE ---------- */
-        const userSnap = await tx.get(userRef)
+       const userSnap = await tx.get(userRef)
 
-        if (!userSnap.exists || userSnap.get('pro') !== true) {
-          throw new Error('PRO_REQUIRED')
-        }
+       if (!userSnap.exists) {
+      throw new Error('PRO_REQUIRED')
+   }
 
+      const userData = userSnap.data() || {}
+
+      const rawProUntil = userData.proUntil
+
+      let proUntil = null
+
+      if (typeof rawProUntil === "number") {
+     proUntil = rawProUntil
+    } else if (rawProUntil?.toMillis) {
+      proUntil = rawProUntil.toMillis()
+   }
+
+   if (!proUntil || Date.now() >= proUntil) {
+  throw new Error("PRO_REQUIRED")
+   }
+
+  const orgId = userData.orgId || uid
         // Generate all serials (READ ONLY)
-        const serials = []
+       const serials = []
 let attempts = 0
-const MAX_ATTEMPTS = count * 10 // safety cap
+const MAX_ATTEMPTS = count * 10
 
 while (serials.length < count && attempts < MAX_ATTEMPTS) {
   attempts++
 
   const s = generateSerial()
-  const certRef = db.collection('certificates').doc(s)
-  const snap = await tx.get(certRef)
+
+  const lookupRef = db.collection('certificateLookup').doc(s)
+  const snap = await tx.get(lookupRef)
 
   if (!snap.exists && !serials.includes(s)) {
     serials.push(s)
@@ -824,29 +896,45 @@ if (serials.length < count) {
 
         // Lock serials
         for (const s of serials) {
-          const certRef = db.collection('certificates').doc(s)
-          tx.set(certRef, {
-            reserved: true,
-            reservedBy: uid,
-            batchId: batchRef.id,
-            reservedAt: now
-          })
-        }
 
-        // Batch record
-        tx.set(batchRef, {
-          ownerUid: uid,
-          count,
-          serials,
-          status: 'prepared',
-          meta: {
-            ...meta,
-            ip: req.ip,
-            ua: req.headers['user-agent']
-          },
-          createdAt: now
-        })
+  const certRef = db.collection('certificates').doc(s)
 
+  const orgCertRef = db
+    .collection('orgs')
+    .doc(orgId)
+    .collection('certificates')
+    .doc(s)
+
+  const lookupRef = db.collection('certificateLookup').doc(s)
+
+  // reserve certificate
+  tx.set(certRef, {
+    reserved: true,
+    reservedBy: uid,
+    batchId: batchRef.id,
+    reservedAt: now
+  })
+
+  // reserve org certificate
+  tx.set(orgCertRef, {
+    reserved: true,
+    reservedBy: uid,
+    batchId: batchRef.id,
+    reservedAt: now,
+    ownerUid: uid,
+    orgId
+  })
+
+  // reserve lookup
+  tx.set(lookupRef, {
+    serial: s,
+    orgId,
+    ownerUid: uid,
+    reserved: true,
+    batchId: batchRef.id,
+    createdAt: now
+  })
+}
         return { serials, batchId: batchRef.id }
       })
 
@@ -890,45 +978,71 @@ app.post('/api/certificates/revoke', authenticate, async (req, res) => {
     if (!SERIAL_RE.test(normalizedSerial)) {
     return res.status(400).json({ ok: false, error: 'Invalid serial format' })
    }
+  const lookupRef = db.collection('certificateLookup').doc(normalizedSerial)
 
-     const certRef = db.collection('certificates').doc(normalizedSerial)
+await db.runTransaction(async (tx) => {
 
-    await db.runTransaction(async (tx) => {
-      const snap = await tx.get(certRef)
+  const lookupSnap = await tx.get(lookupRef)
 
-      if (!snap.exists) {
-        throw new Error('NOT_FOUND')
-      }
+  if (!lookupSnap.exists) {
+    throw new Error('NOT_FOUND')
+  }
 
-      const cert = snap.data()
+  const { orgId } = lookupSnap.data()
 
-      // Ownership enforcement
-      if (cert.ownerUid !== uid) {
-        throw new Error('FORBIDDEN')
-      }
+  const certRef = db.collection('certificates').doc(normalizedSerial)
 
-      // Prevent double revoke
-      if (cert.status === 'revoked') {
-        throw new Error('ALREADY_REVOKED')
-      }
+  const orgCertRef = db
+    .collection('orgs')
+    .doc(orgId)
+    .collection('certificates')
+    .doc(normalizedSerial)
 
-      const now = admin.firestore.FieldValue.serverTimestamp()
+  const snap = await tx.get(certRef)
 
-      tx.update(certRef, {
-        status: 'revoked',
-        revokeReason: reason || 'Revoked by issuer',
-        revokedAt: now,
-        revokedBy: uid,
-      })
-       tx.set(certRef.collection('history').doc(), {
-       action: 'revoked',
-       by: uid,
-       reason: reason || 'Revoked by issuer',
-       at: now,
-       source: 'api',
-       ip: req.ip
-      })
-    })
+  if (!snap.exists) {
+    throw new Error('NOT_FOUND')
+  }
+
+  const cert = snap.data()
+
+  if (cert.reserved === true) {
+    throw new Error('NOT_FOUND')
+  }
+
+  if (cert.ownerUid !== uid) {
+    throw new Error('FORBIDDEN')
+  }
+
+  if (cert.status === 'revoked') {
+    throw new Error('ALREADY_REVOKED')
+  }
+
+  const now = admin.firestore.FieldValue.serverTimestamp()
+
+  const updatePayload = {
+    status: 'revoked',
+    revokeReason: reason || 'Revoked by issuer',
+    revokedAt: now,
+    revokedBy: uid
+  }
+
+  // Update legacy certificate
+  tx.update(certRef, updatePayload)
+
+  // Update org certificate
+  tx.update(orgCertRef, updatePayload)
+
+  // Write history
+  tx.set(certRef.collection('history').doc(), {
+    action: 'revoked',
+    by: uid,
+    reason: reason || 'Revoked by issuer',
+    at: now,
+    source: 'api',
+    ip: req.ip
+  })
+})
 
     return res.json({ ok: true })
 
@@ -965,44 +1079,68 @@ app.post('/api/certificates/restore', authenticate, async (req, res) => {
    if (!SERIAL_RE.test(normalizedSerial)) {
   return res.status(400).json({ ok: false, error: 'Invalid serial format' })
    }
+  const lookupRef = db.collection('certificateLookup').doc(normalizedSerial)
 
-    const certRef = db.collection('certificates').doc(normalizedSerial)
-    await db.runTransaction(async (tx) => {
-      const snap = await tx.get(certRef)
+await db.runTransaction(async (tx) => {
 
-      if (!snap.exists) {
-        throw new Error('NOT_FOUND')
-      }
+  const lookupSnap = await tx.get(lookupRef)
 
-      const cert = snap.data()
+  if (!lookupSnap.exists) {
+    throw new Error('NOT_FOUND')
+  }
 
-      if (cert.ownerUid !== uid) {
-        throw new Error('FORBIDDEN')
-      }
+  const { orgId } = lookupSnap.data()
 
-      if (cert.status !== 'revoked') {
-        throw new Error('NOT_REVOKED')
-      }
+  const certRef = db.collection('certificates').doc(normalizedSerial)
 
-      const now = admin.firestore.FieldValue.serverTimestamp()
+  const orgCertRef = db
+    .collection('orgs')
+    .doc(orgId)
+    .collection('certificates')
+    .doc(normalizedSerial)
 
-      tx.update(certRef, {
-        status: 'valid',
-        revokeReason: null,
-        revokedAt: null,
-        revokedBy: null,
-        restoredAt: now,
-        restoredBy: uid,
-      })
+  const snap = await tx.get(certRef)
 
-        tx.set(certRef.collection('history').doc(), {
-        action: 'restored',
-        by: uid,
-        at: now,
-        source: 'api',
-        ip: req.ip
-      })
-    })
+  if (!snap.exists) {
+    throw new Error('NOT_FOUND')
+  }
+
+  const cert = snap.data()
+
+  if (cert.ownerUid !== uid) {
+    throw new Error('FORBIDDEN')
+  }
+
+  if (cert.status !== 'revoked') {
+    throw new Error('NOT_REVOKED')
+  }
+
+  const now = admin.firestore.FieldValue.serverTimestamp()
+
+  const updatePayload = {
+    status: 'valid',
+    revokeReason: null,
+    revokedAt: null,
+    revokedBy: null,
+    restoredAt: now,
+    restoredBy: uid
+  }
+
+  // update legacy certificate
+  tx.update(certRef, updatePayload)
+
+  // update org certificate
+  tx.update(orgCertRef, updatePayload)
+
+  // history log
+  tx.set(certRef.collection('history').doc(), {
+    action: 'restored',
+    by: uid,
+    at: now,
+    source: 'api',
+    ip: req.ip
+  })
+ })
 
     return res.json({ ok: true })
 
@@ -1038,15 +1176,36 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Invalid format' })
     }
 
-    const certRef = db.collection('certificates').doc(rawSerial)
-    const snap = await certRef.get()
+    let cert = null
 
-    if (!snap.exists) {
-      // Uniform response to avoid enumeration timing leaks
-      return res.status(404).json({ ok: false })
-    }
+// 1️⃣ Try new lookup system
+const lookupSnap = await db.collection('certificateLookup').doc(rawSerial).get()
 
-    const cert = snap.data()
+if (lookupSnap.exists) {
+  const { orgId } = lookupSnap.data()
+
+  const orgCertSnap = await db
+    .collection('orgs')
+    .doc(orgId)
+    .collection('certificates')
+    .doc(rawSerial)
+    .get()
+
+  if (orgCertSnap.exists) {
+    cert = orgCertSnap.data()
+  }
+}
+
+// 2️⃣ Fallback to legacy certificates collection
+if (!cert) {
+  const legacySnap = await db.collection('certificates').doc(rawSerial).get()
+
+  if (!legacySnap.exists) {
+    return res.status(404).json({ ok: false })
+  }
+
+  cert = legacySnap.data()
+}
 
     // Block archived
     if (cert.status === 'archived') {
@@ -1080,14 +1239,25 @@ if (cert.visibility === 'private') {
     }
 
     //  Log verification server-side
-    await db.collection('verificationLogs').add({
-      serial: rawSerial,
-      orgId: cert.orgId || null,
-      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
-      ip: req.ip,
-      ua: req.headers['user-agent'] || null
-    })
+   db.collection('verificationLogs')
+  .add({
+    serial: rawSerial,
+    orgId: cert.orgId || null,
+    viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    ip: req.ip,
+    ua: req.headers['user-agent'] || null
+  })
+  .catch(() => {})
+      
+    // Detect expiry
+  let finalStatus = cert.status
 
+  if (cert.expiryDate) {
+  const expiry = new Date(cert.expiryDate).getTime()
+  if (!isNaN(expiry) && Date.now() > expiry) {
+    finalStatus = "expired"
+  }
+ }
     //  Return only public-safe fields
     const publicPayload = {
       serial: cert.serial,
@@ -1096,7 +1266,7 @@ if (cert.visibility === 'private') {
       orgName: cert.orgName,
       issueDate: cert.issueDate,
       expiryDate: cert.expiryDate || null,
-      status: cert.status,
+      status: finalStatus,
       revokeReason: cert.revokeReason || null,
       revokedAt: cert.revokedAt || null,
       createdAt: cert.createdAt || null,
@@ -1285,7 +1455,7 @@ app.get('/pesapal/registerIPN', async (req, res) => {
 
 
 /* ============== Pesapal: token test ============== */
-app.get('/pesapal/tokenTest', async (_req, res) => {
+app.get('/pesapal/tokenTest', authenticate, async (_req, res) => {
   try {
     const { base } = await pesaToken()
     res.json({ ok:true, base })
@@ -1397,7 +1567,7 @@ app.post("/api/billing/reconcile", authenticate, async (req, res) => {
 
 
 /* ============== Pesapal: manual status check (optional) ============== */
-app.get('/pesapal/getStatus', async (req, res) => {
+app.get('/pesapal/getStatus', authenticate, async (req, res) => {
   try {
     const orderTrackingId = req.query.orderTrackingId
     if (!orderTrackingId) return res.status(400).json({ ok:false, error:'Missing orderTrackingId' })
@@ -1429,9 +1599,7 @@ async function handlePesaNotification(params, res) {
     )
 
     const paid = Number(status?.status_code) === 1 &&
-             String(status?.payment_status_description || '')
-               .toLowerCase()
-               .includes('completed')
+    String(status?.payment_status_description || '') .toLowerCase() .includes('completed')
     const mr = String(status?.merchant_reference || "")
     let uid = null
     let planId = null
@@ -1452,12 +1620,25 @@ async function handlePesaNotification(params, res) {
    }
 
 
-    
     const amount = status?.amount
-    const currency = String(status?.currency || CURRENCY).toUpperCase()
+const currency = String(status?.currency || CURRENCY).toUpperCase()
 
-    // Only proceed if paid and server is healthy
-    if (paid && db && uid && mr) {
+/* ---------- PAYMENT AMOUNT VERIFICATION ---------- */
+const expectedAmount = AMOUNT_BY_PLAN[planId]
+
+if (paid && expectedAmount && Number(amount) !== Number(expectedAmount)) {
+  console.error("⚠ Payment amount mismatch", {
+    amount,
+    expectedAmount,
+    planId,
+    merchantRef: mr
+  })
+
+  return res.status(400).json({ ok:false, error:"Payment amount mismatch" })
+}
+
+/* ---------- Continue if paid ---------- */
+if (paid && db && uid && mr) {
       const orderRef = db.collection("orders").doc(mr)
       const orderSnap = await orderRef.get()
 
@@ -1608,6 +1789,12 @@ app.get('/api/org/:orgId/verify-domain', authenticate, orgVerifyLimiter, async (
     }
    const rawDomain = orgData.customVerifyDomain
 const domain = normalizeDomain(rawDomain)
+if (domain.split('.').length < 3) {
+  return res.status(400).json({
+    ok:false,
+    error:'Use a subdomain (example: verify.yourschool.com)'
+  })
+}
 
 if (!domain) {
   return res.status(400).json({ ok: false, error: 'No custom domain set for this org' })
@@ -1637,13 +1824,18 @@ if (
     error: 'Domain already in use by another organization'
   })
  }
-    if (!domain) return res.status(400).json({ ok: false, error: 'No custom domain set for this org' })
+    
 
     // Attempt CNAME lookup then TXT fallback
     let verified = false
     let cnames = []
     try {
-      cnames = await dns.resolveCname(domain)
+      cnames = await Promise.race([
+  dns.resolveCname(domain),
+  new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('DNS lookup timeout')), 4000)
+  )
+ ])
       verified = cnames.includes(VERIFY_CNAME_TARGET)
     } catch (err) {
       if (!['ENODATA', 'ENOTFOUND'].includes(err.code)) throw err
@@ -1685,7 +1877,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
 
 
 
