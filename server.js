@@ -597,13 +597,7 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
  }
 
  // Stronger payload guard (prevents empty or whitespace values)
- if (
-  !String(data.recipientName || '').trim() ||
-  !String(data.courseTitle || '').trim() ||
-  !String(orgData.name || '').trim()
- ) {
-  return res.status(400).json({ ok: false, error: 'Missing required fields' })
- }
+ 
 
 
     const userRef = db.collection('users').doc(uid)
@@ -626,6 +620,14 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
    }
 
      const orgData = orgSnap.data() || {}
+     // Stronger payload guard (prevents empty or whitespace values)
+if (
+  !String(data.recipientName || '').trim() ||
+  
+  !String(orgData.name || '').trim()
+) {
+  throw new Error('MISSING_REQUIRED_FIELDS')
+}
     
       // Pro check
   const rawProUntil = userData.proUntil
