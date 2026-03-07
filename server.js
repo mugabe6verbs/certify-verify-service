@@ -678,7 +678,7 @@ if (!serial) {
   throw new Error('SERIAL_GENERATION_FAILED')
 }
    // Determine verification domain at issuance time (LOCKED)
-let domainUsed = clean(PUBLIC_SITE_URL || "getcertifyhq.com")
+let domainUsed = normalizeDomain(PUBLIC_SITE_URL) || "getcertifyhq.com"
 
 if (
   orgData?.customVerifyDomain &&
@@ -736,7 +736,7 @@ if (PRO_TEMPLATES.includes(template)) {
   issuerPosition: data.issuerPosition || null,
   issuerName2: data.issuerName2 || null,
   issuerPosition2: data.issuerPosition2 || null,
-  orgId,orgName: String(orgData.name || '').trim(),
+  orgId, orgName: String(orgData.name || '').trim(),
 
   logoDataUrl: data.logoDataUrl || null,
   sigDataUrl: data.sigDataUrl || null,
@@ -1238,9 +1238,19 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
     let cert = null
 
 const lookupSnap = await db.collection('certificateLookup').doc(rawSerial).get()
+ if (lookupSnap.exists) {
+  const { orgId } = lookupSnap.data()
 
-if (lookupSnap.exists) {
-  cert = lookupSnap.data()
+  const orgCertSnap = await db
+    .collection('orgs')
+    .doc(orgId)
+    .collection('certificates')
+    .doc(rawSerial)
+    .get()
+
+  if (orgCertSnap.exists) {
+    cert = orgCertSnap.data()
+  }
 }
 
 if (!cert) {
@@ -1325,7 +1335,7 @@ if (
       template: cert.template,
       brand: cert.brand || null,
    }
-     res.set("Cache-Control", "public, max-age=60, s-maxage=300");
+     res.set("Cache-Control", "public, max-age=0, s-maxage=300");
     return res.json({ ok: true, certificate: publicPayload })
 
   } catch (e) {
