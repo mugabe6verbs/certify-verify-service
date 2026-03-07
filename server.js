@@ -647,29 +647,18 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
  if (!proUntil || Date.now() >= proUntil) {
   throw new Error("PRO_REQUIRED")
  }
-
-     let serial = null
+  let serial = null
 let lookupRef = null
 
 for (let i = 0; i < 5; i++) {
   const trySerial = generateSerial()
-  const ref = db.collection('certificateLookup').doc(trySerial)
 
+  const ref = db.collection('certificateLookup').doc(trySerial)
   const snap = await tx.get(ref)
 
   if (!snap.exists) {
     serial = trySerial
     lookupRef = ref
-
-    // Reserve serial immediately
-    tx.set(ref, {
-      serial: trySerial,
-      orgId,
-      ownerUid: uid,
-      reserved: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    })
-
     break
   }
 }
@@ -678,7 +667,7 @@ if (!serial) {
   throw new Error('SERIAL_GENERATION_FAILED')
 }
    // Determine verification domain at issuance time (LOCKED)
-let domainUsed = normalizeDomain(PUBLIC_SITE_URL) || "getcertifyhq.com"
+let domainUsed = normalizeDomain(new URL(PUBLIC_SITE_URL).hostname)
 
 if (
   orgData?.customVerifyDomain &&
