@@ -677,15 +677,14 @@ for (let i = 0; i < 5; i++) {
 if (!serial) {
   throw new Error('SERIAL_GENERATION_FAILED')
 }
-     
-       // Determine verification domain at issuance time (LOCKED)
-  let domainUsed = clean(PUBLIC_SITE_URL)
+   // Determine verification domain at issuance time (LOCKED)
+let domainUsed = clean(PUBLIC_SITE_URL || "getcertifyhq.com")
 
 if (
   orgData?.customVerifyDomain &&
   orgData?.domainVerified === true
 ) {
-  domainUsed = orgData.customVerifyDomain
+  domainUsed = clean(orgData.customVerifyDomain)
 }
 
  // Build verification URL (LOCKED FOREVER)
@@ -837,7 +836,13 @@ tx.set(lookupRef, {
     if (e.message === 'PRO_REQUIRED') {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
     }
-
+      
+if (e.message === 'MISSING_REQUIRED_FIELDS') {
+  return res.status(400).json({
+    ok: false,
+    error: 'Missing required certificate fields'
+  })
+}
     if (e.message?.toLowerCase().includes('limit')) {
       return res.status(429).json({ ok: false, error: e.message })
     }
