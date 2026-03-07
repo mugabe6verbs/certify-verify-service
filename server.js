@@ -180,6 +180,11 @@ const PLAN_LIMITS = {
 
 // Resolve plan → limits safely
 function resolveLimits(data) {
+  // ADMIN override
+  if (data?.isAdmin === true) {
+    return PLAN_LIMITS.pro_admin
+  }
+
   const raw = String(data?.planId || "free").toLowerCase()
 
   return (
@@ -620,10 +625,9 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
    }
 
      const orgData = orgSnap.data() || {}
-     // Stronger payload guard (prevents empty or whitespace values)
-if (
+  if (
   !String(data.recipientName || '').trim() ||
-  
+  !String(data.courseTitle || '').trim() ||
   !String(orgData.name || '').trim()
 ) {
   throw new Error('MISSING_REQUIRED_FIELDS')
@@ -644,34 +648,45 @@ if (
   throw new Error("PRO_REQUIRED")
  }
 
-      // Generate unique serial (READ ONLY)
- let serial = null
+     let serial = null
+let lookupRef = null
 
- for (let i = 0; i < 5; i++) {
+for (let i = 0; i < 5; i++) {
   const trySerial = generateSerial()
+  const ref = db.collection('certificateLookup').doc(trySerial)
 
-  const lookupRef = db.collection('certificateLookup').doc(trySerial)
-  const snap = await tx.get(lookupRef)
+  const snap = await tx.get(ref)
 
   if (!snap.exists) {
     serial = trySerial
+    lookupRef = ref
+
+    // Reserve serial immediately
+    tx.set(ref, {
+      serial: trySerial,
+      orgId,
+      ownerUid: uid,
+      reserved: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    })
+
     break
   }
- }
+}
 
- if (!serial) {
+if (!serial) {
   throw new Error('SERIAL_GENERATION_FAILED')
- }
+}
      
        // Determine verification domain at issuance time (LOCKED)
- let domainUsed = clean(PUBLIC_SITE_URL)
+  let domainUsed = clean(PUBLIC_SITE_URL)
 
- if (
+if (
   orgData?.customVerifyDomain &&
   orgData?.domainVerified === true
- ) {
+) {
   domainUsed = orgData.customVerifyDomain
- }
+}
 
  // Build verification URL (LOCKED FOREVER)
  const verifyUrl = `https://${domainUsed}/verify/${serial}`
@@ -690,9 +705,9 @@ if (
       
       const certRef = db.collection('certificates').doc(serial)
 
- const orgCertRef = db.collection('orgs').doc(orgId).collection('certificates').doc(serial)
+      const orgCertRef = db.collection('orgs').doc(orgId).collection('certificates').doc(serial)
 
- const lookupRef = db.collection('certificateLookup').doc(serial)
+ 
       const historyRef = certRef.collection('history').doc()
  
     /* ---------- TEMPLATE VALIDATION ---------- */
@@ -753,18 +768,46 @@ if (PRO_TEMPLATES.includes(template)) {
       // Writes
       // Main certificate (legacy global collection)
  tx.set(certRef, payload, { merge: true })
+ // Org-scoped certificate (fast org queries - lightweight)
+tx.set(orgCertRef, {
+  serial,
+  recipientName: payload.recipientName,
+  courseTitle: payload.courseTitle,
+  orgName: payload.orgName,
+  status: payload.status,
+  template: payload.template,
+  issueDate: payload.issueDate,
+  expiryDate: payload.expiryDate || null,
+  externalId: payload.externalId || null,
+  titleText: payload.titleText || null,
+  createdAt: payload.createdAt,
+  ownerUid: payload.ownerUid,
+  orgId: payload.orgId
+}, { merge: true })
 
- // Org-scoped certificate (fast org queries)
- tx.set(orgCertRef, payload, { merge: true })
-
- // Global serial registry
- tx.set(lookupRef, {
+  // Global serial registry (verification snapshot)
+tx.set(lookupRef, {
   serial,
   orgId,
   ownerUid: uid,
-  createdAt: now
- })
 
+  orgName: payload.orgName,
+  recipientName: payload.recipientName,
+  courseTitle: payload.courseTitle,
+
+  issueDate: payload.issueDate || null,
+  expiryDate: payload.expiryDate || null,
+
+  template: payload.template || "classic",
+  brand: payload.brand || null,
+
+  status: payload.status || "valid",
+  visibility: payload.visibility || "public",
+
+  verificationDomain: domainUsed,
+
+  createdAt: now
+}, { merge: true })
  // Issuance history
  tx.set(historyRef, {
   action: 'issued',
@@ -862,7 +905,9 @@ app.post(
 
   const orgId = userData.orgId || uid
         // Generate all serials (READ ONLY)
-       const serials = []
+        const serials = []
+const serialSet = new Set()
+
 let attempts = 0
 const MAX_ATTEMPTS = count * 10
 
@@ -874,8 +919,9 @@ while (serials.length < count && attempts < MAX_ATTEMPTS) {
   const lookupRef = db.collection('certificateLookup').doc(s)
   const snap = await tx.get(lookupRef)
 
-  if (!snap.exists && !serials.includes(s)) {
+  if (!snap.exists && !serialSet.has(s)) {
     serials.push(s)
+    serialSet.add(s)
   }
 }
 
@@ -895,7 +941,7 @@ if (serials.length < count) {
         }
 
         const now = admin.firestore.FieldValue.serverTimestamp()
-
+        tx.set(batchRef, { ownerUid: uid, orgId, count, createdAt: now, meta})
         // Lock serials
         for (const s of serials) {
 
@@ -911,21 +957,27 @@ if (serials.length < count) {
 
   // reserve certificate
   tx.set(certRef, {
-    reserved: true,
-    reservedBy: uid,
-    batchId: batchRef.id,
-    reservedAt: now
-  })
+  reserved: true,
+  reservedBy: uid,
+  batchId: batchRef.id,
+  reservedAt: now,
+  reservationExpiresAt: admin.firestore.Timestamp.fromMillis(
+    Date.now() + 30 * 60 * 1000
+  )
+})
 
   // reserve org certificate
-  tx.set(orgCertRef, {
-    reserved: true,
-    reservedBy: uid,
-    batchId: batchRef.id,
-    reservedAt: now,
-    ownerUid: uid,
-    orgId
-  })
+   tx.set(orgCertRef, {
+  reserved: true,
+  reservedBy: uid,
+  batchId: batchRef.id,
+  reservedAt: now,
+  reservationExpiresAt: admin.firestore.Timestamp.fromMillis(
+    Date.now() + 30 * 60 * 1000
+  ),
+  ownerUid: uid,
+  orgId
+})
 
   // reserve lookup
   tx.set(lookupRef, {
@@ -1180,25 +1232,12 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
 
     let cert = null
 
-// 1️⃣ Try new lookup system
 const lookupSnap = await db.collection('certificateLookup').doc(rawSerial).get()
 
 if (lookupSnap.exists) {
-  const { orgId } = lookupSnap.data()
-
-  const orgCertSnap = await db
-    .collection('orgs')
-    .doc(orgId)
-    .collection('certificates')
-    .doc(rawSerial)
-    .get()
-
-  if (orgCertSnap.exists) {
-    cert = orgCertSnap.data()
-  }
+  cert = lookupSnap.data()
 }
 
-// 2️⃣ Fallback to legacy certificates collection
 if (!cert) {
   const legacySnap = await db.collection('certificates').doc(rawSerial).get()
 
@@ -1241,25 +1280,31 @@ if (cert.visibility === 'private') {
     }
 
     //  Log verification server-side
-   db.collection('verificationLogs')
-  .add({
-    serial: rawSerial,
-    orgId: cert.orgId || null,
-    viewedAt: admin.firestore.FieldValue.serverTimestamp(),
-    ip: req.ip,
-    ua: req.headers['user-agent'] || null
-  })
-  .catch(() => {})
+   setImmediate(() => {
+  db.collection('verificationLogs')
+    .add({
+      serial: rawSerial,
+      orgId: cert.orgId || null,
+      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      ip: req.ip,
+      ua: req.headers['user-agent'] || null
+    })
+    .catch(() => {})
+})
       
     // Detect expiry
-  let finalStatus = cert.status
+   let finalStatus = cert.status
 
-  if (cert.expiryDate) {
+if (
+  cert.status === "valid" &&
+  cert.expiryDate
+) {
   const expiry = new Date(cert.expiryDate).getTime()
+
   if (!isNaN(expiry) && Date.now() > expiry) {
     finalStatus = "expired"
   }
- }
+}
     //  Return only public-safe fields
     const publicPayload = {
       serial: cert.serial,
@@ -1273,14 +1318,9 @@ if (cert.visibility === 'private') {
       revokedAt: cert.revokedAt || null,
       createdAt: cert.createdAt || null,
       template: cert.template,
-      brand: {
-      primaryColor: cert.brand?.primaryColor || null,
-      secondaryColor: cert.brand?.secondaryColor || null,
-      logoDataUrl: cert.brand?.logoDataUrl || null
-   },
-     visibility: cert.visibility
-}
-
+      brand: cert.brand || null,
+   }
+     res.set("Cache-Control", "public, max-age=60, s-maxage=300");
     return res.json({ ok: true, certificate: publicPayload })
 
   } catch (e) {
@@ -1757,6 +1797,10 @@ app.post("/pesapal/ipn", ipnLimiter, (req, res) =>
   const decoded = await admin.auth().verifyIdToken(idToken, true)
 
   await admin.auth().setCustomUserClaims(decoded.uid, { admin: true })
+
+await db.collection("users").doc(decoded.uid).set({
+  isAdmin: true
+}, { merge: true })
   await admin.auth().revokeRefreshTokens(decoded.uid)
 
   res.json({ ok: true })
