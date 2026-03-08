@@ -16,6 +16,8 @@
     "express-rate-limit": "^7.2.0",
     "firebase-admin": "^12.5.0",
     "helmet": "^7.1.0",
-    "morgan": "^1.10.0"
+    "morgan": "^1.10.0",
+     "lru-cache": "^10.2.0"
   }
 }
+
