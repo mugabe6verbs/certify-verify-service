@@ -1331,21 +1331,24 @@ if (cert.visibility === 'private') {
       }
     }
 
-    //  Domain binding enforcement
-    if (
-      orgData?.customVerifyDomain &&
-      orgData?.domainVerified === true
-    ) {
-      const requestHost = req.hostname.toLowerCase()
-      const expectedHost = orgData.customVerifyDomain.toLowerCase()
+  // Domain binding enforcement
+if (
+  orgData?.customVerifyDomain &&
+  orgData?.domainVerified === true
+) {
+  const requestHost = req.hostname.toLowerCase()
+  const expectedHost = orgData.customVerifyDomain.toLowerCase()
 
-     if (requestHost !== expectedHost) {
-  return res.redirect(
-    302,
-    `https://${expectedHost}/verify/${rawSerial}`
-  )
+  // Do NOT redirect API calls
+  const isApiHost = requestHost === "api.getcertifyhq.com"
+
+  if (!isApiHost && requestHost !== expectedHost) {
+    return res.redirect(
+      302,
+      `https://${expectedHost}/verify/${rawSerial}`
+    )
+  }
 }
-    }
 
     //  Log verification server-side
    setImmediate(() => {
@@ -2016,6 +2019,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
