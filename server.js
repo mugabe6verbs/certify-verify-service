@@ -7,6 +7,7 @@ import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
+import LRU from 'lru-cache'
 
 const {
   PORT = 8080,
@@ -91,6 +92,12 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
 
   return size <= maxBytes
 }
+
+/* ============== Verification Cache ============== */
+const verifyCache = new LRU({
+  max: 5000, // cache up to 5000 certificates
+  ttl: 1000 * 60 * 5 // 5 minutes
+})
 
 /* ============== Firebase Admin ============== */
 const privateKey = clean(FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
@@ -587,6 +594,15 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
  const data = req.body || {}
+ const idempotencyKey = req.headers['x-idempotency-key']
+ if (idempotencyKey) {
+  const keyRef = db.collection('idempotency').doc(String(idempotencyKey))
+  const keySnap = await keyRef.get()
+
+  if (keySnap.exists) {
+    return res.json(keySnap.data())
+  }
+}
  // Validate image payload sizes
  if (
   !validateDataUrlSize(data.logoDataUrl) ||
@@ -813,11 +829,20 @@ tx.set(lookupRef, {
  // Safe post-transaction log
  console.log("ISSUED CERT:", { uid, serial: result.serial })
 
-    return res.json({
+   const response = {
   ok: true,
   serial: result.serial,
   verifyUrl: result.verifyUrl
-})
+}
+
+if (idempotencyKey) {
+  await db.collection('idempotency').doc(String(idempotencyKey)).set({
+    ...response,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  })
+}
+
+return res.json(response)
 
   } catch (e) {
     console.error('ISSUE CERT ERROR', e)
@@ -1080,6 +1105,8 @@ await db.runTransaction(async (tx) => {
 
   // Update org certificate
   tx.update(orgCertRef, updatePayload)
+  tx.update(lookupRef, { status: 'revoked'
+})
 
   // Write history
   tx.set(certRef.collection('history').doc(), {
@@ -1180,6 +1207,9 @@ await db.runTransaction(async (tx) => {
   // update org certificate
   tx.update(orgCertRef, updatePayload)
 
+  // update lookup snapshot
+ tx.update(lookupRef, { status: 'valid' })
+
   // history log
   tx.set(certRef.collection('history').doc(), {
     action: 'restored',
@@ -1216,7 +1246,26 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
       return res.status(500).json({ ok: false })
     }
 
-    const rawSerial = String(req.params.serial || '').toUpperCase()
+const rawSerial = String(req.params.serial || '').toUpperCase()
+const ip = req.ip
+
+const abuseRef = db.collection('verifyAbuse').doc(ip)
+const abuseSnap = await abuseRef.get()
+const abuseData = abuseSnap.data() || {}
+
+if (abuseData.count && abuseData.count > 200) {
+  return res.status(429).json({ ok: false })
+}
+
+await abuseRef.set({
+  count: admin.firestore.FieldValue.increment(1),
+  lastSeen: admin.firestore.FieldValue.serverTimestamp()
+}, { merge: true })
+    // Check verification cache
+const cached = verifyCache.get(rawSerial)
+if (cached) {
+  return res.json(cached)
+}
 
     const SERIAL_RE = /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
 
@@ -1238,18 +1287,31 @@ const lookupSnap = await db.collection('certificateLookup').doc(rawSerial).get()
     .get()
 
   if (orgCertSnap.exists) {
-    cert = orgCertSnap.data()
+    cert = { ...orgCertSnap.data(), orgId }
+  }
+}
+  if (!cert) {
+
+  // Fallback search across all organizations
+  const groupSnap = await db
+    .collectionGroup('certificates')
+    .where(admin.firestore.FieldPath.documentId(), '==', rawSerial)
+    .limit(1)
+    .get()
+
+  if (!groupSnap.empty) {
+    const doc = groupSnap.docs[0]
+    cert = doc.data()
+
+    // recover orgId from path if missing
+    if (!cert.orgId) {
+      cert.orgId = doc.ref.parent.parent.id
+    }
   }
 }
 
 if (!cert) {
-  const legacySnap = await db.collection('certificates').doc(rawSerial).get()
-
-  if (!legacySnap.exists) {
-    return res.status(404).json({ ok: false })
-  }
-
-  cert = legacySnap.data()
+  return res.status(404).json({ ok: false })
 }
 
     // Block archived
@@ -1278,9 +1340,12 @@ if (cert.visibility === 'private') {
       const requestHost = req.hostname.toLowerCase()
       const expectedHost = orgData.customVerifyDomain.toLowerCase()
 
-      if (requestHost !== expectedHost) {
-        return res.status(403).json({ ok: false })
-      }
+     if (requestHost !== expectedHost) {
+  return res.redirect(
+    302,
+    `https://${expectedHost}/verify/${rawSerial}`
+  )
+}
     }
 
     //  Log verification server-side
@@ -1311,21 +1376,46 @@ if (
 }
     //  Return only public-safe fields
     const publicPayload = {
-      serial: cert.serial,
-      recipientName: cert.recipientName,
-      courseTitle: cert.courseTitle,
-      orgName: cert.orgName,
-      issueDate: cert.issueDate,
-      expiryDate: cert.expiryDate || null,
-      status: finalStatus,
-      revokeReason: cert.revokeReason || null,
-      revokedAt: cert.revokedAt || null,
-      createdAt: cert.createdAt || null,
-      template: cert.template,
-      brand: cert.brand || null,
-   }
+  serial: cert.serial,
+  recipientName: cert.recipientName,
+  courseTitle: cert.courseTitle,
+  achievementText: cert.achievementText || null,
+  customNote: cert.customNote || null,
+  externalId: cert.externalId || null,
+
+  orgName: cert.orgName,
+
+  issuerName: cert.issuerName || null,
+  issuerPosition: cert.issuerPosition || null,
+  issuerName2: cert.issuerName2 || null,
+  issuerPosition2: cert.issuerPosition2 || null,
+
+  issueDate: cert.issueDate,
+  expiryDate: cert.expiryDate || null,
+
+  logoDataUrl: cert.logoDataUrl || null,
+  sigDataUrl: cert.sigDataUrl || null,
+  sigDataUrl2: cert.sigDataUrl2 || null,
+  photoDataUrl: cert.photoDataUrl || null,
+  sealDataUrl: cert.sealDataUrl || null,
+
+  titleText: cert.titleText || "Certificate",
+
+  template: cert.template,
+  brand: cert.brand || null,
+  i18n: cert.i18n || {},
+
+  status: finalStatus,
+  revokeReason: cert.revokeReason || null,
+  revokedAt: cert.revokedAt || null,
+  createdAt: cert.createdAt || null,
+}
      res.set("Cache-Control", "public, max-age=0, s-maxage=300");
-    return res.json({ ok: true, certificate: publicPayload })
+    const response = { ok: true, certificate: publicPayload }
+
+verifyCache.set(rawSerial, response)
+
+return res.json(response)
 
   } catch (e) {
     console.error('VERIFY ERROR', e)
