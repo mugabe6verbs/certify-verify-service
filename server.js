@@ -7,7 +7,7 @@ import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
-import LRU from 'lru-cache'
+import { LRUCache } from 'lru-cache'
 
 const {
   PORT = 8080,
@@ -2017,6 +2017,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
