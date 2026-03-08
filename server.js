@@ -92,11 +92,10 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
 
   return size <= maxBytes
 }
-
 /* ============== Verification Cache ============== */
-const verifyCache = new LRU({
-  max: 5000, // cache up to 5000 certificates
-  ttl: 1000 * 60 * 5 // 5 minutes
+const verifyCache = new LRUCache({
+  max: 5000,
+  ttl: 1000 * 60 * 5
 })
 
 /* ============== Firebase Admin ============== */
@@ -2017,6 +2016,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
