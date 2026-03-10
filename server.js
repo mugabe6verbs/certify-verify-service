@@ -1237,6 +1237,8 @@ await db.runTransaction(async (tx) => {
   }
 })
 
+
+
 /* ============== VERIFICATION ============== */
 
 app.get('/verify/:serial', verifyLimiter, async (req, res) => {
@@ -1330,8 +1332,7 @@ if (cert.visibility === 'private') {
         orgData = orgSnap.data()
       }
     }
-
-  // Domain binding enforcement
+ // Domain binding enforcement
 if (
   orgData?.customVerifyDomain &&
   orgData?.domainVerified === true
@@ -2019,6 +2020,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
