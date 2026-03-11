@@ -25,7 +25,10 @@ const {
   VERIFY_CNAME_TARGET = 'custom.getcertifyhq.com',
   ADMIN_PASSWORD 
 } = process.env
-
+const allowList = (ALLOW_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
 const FREE_TEMPLATES = ['minimal', 'classic-border']
 
 const PRO_TEMPLATES = [
@@ -2053,6 +2056,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
