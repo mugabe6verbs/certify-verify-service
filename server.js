@@ -393,34 +393,67 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
   next()
  })
  app.set('trust proxy', 1)
+const PLATFORM_DOMAIN = "getcertifyhq.com"
 
- const allowList = (ALLOW_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
+const corsOptions = {
+  origin: async (origin, cb) => {
 
- const corsOptions = {
-  origin(origin, cb) {
-    
-    if (!origin) return cb(null, true) // server-to-server, redirects
-    if (allowList.includes(origin)) return cb(null, true)
+    try {
 
-    
-    return cb(null, false)
+      // allow server-to-server or curl
+      if (!origin) return cb(null, true)
+
+      const url = new URL(origin)
+      const hostname = url.hostname.toLowerCase()
+
+      // Allow main platform
+      if (hostname === PLATFORM_DOMAIN) {
+        return cb(null, true)
+      }
+
+      // Allow platform subdomains
+      if (hostname.endsWith(`.${PLATFORM_DOMAIN}`)) {
+        return cb(null, true)
+      }
+
+      // Allow origins from env list
+      if (allowList.includes(origin)) {
+        return cb(null, true)
+      }
+
+      // Check verified custom domains
+      const orgSnap = await db.collection("orgs")
+        .where("customVerifyDomain", "==", hostname)
+        .where("domainVerified", "==", true)
+        .limit(1)
+        .get()
+
+      if (!orgSnap.empty) {
+        return cb(null, true)
+      }
+
+      return cb(new Error("CORS blocked"))
+
+    } catch (err) {
+      console.error("CORS error:", err)
+      return cb(err)
+    }
   },
-  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
+
+  methods: ["GET","POST","OPTIONS","PUT","PATCH","DELETE"],
+
   allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    
+    "Content-Type",
+    "Authorization"
   ],
+
   credentials: true,
-  optionsSuccessStatus: 204,
- }
+  optionsSuccessStatus: 204
+}
 
- app.use(cors(corsOptions))
- app.options('*', cors(corsOptions))
-
+app.use(cors(corsOptions))
+app.options("*", cors(corsOptions))
+ 
  app.use(helmet())
  app.disable('x-powered-by')
 
@@ -2020,6 +2053,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
