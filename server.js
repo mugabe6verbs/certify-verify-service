@@ -1311,23 +1311,12 @@ if (cached) {
     }
 
     let cert = null
+const certSnap = await db.collection('certificates').doc(rawSerial).get()
 
-const lookupSnap = await db.collection('certificateLookup').doc(rawSerial).get()
- if (lookupSnap.exists) {
-  const { orgId } = lookupSnap.data()
-
-  const orgCertSnap = await db
-    .collection('orgs')
-    .doc(orgId)
-    .collection('certificates')
-    .doc(rawSerial)
-    .get()
-
-  if (orgCertSnap.exists) {
-    cert = { ...orgCertSnap.data(), orgId }
-  }
+if (certSnap.exists) {
+  cert = certSnap.data()
 }
-  if (!cert) {
+if (!cert) {
 
   // Fallback search across all organizations
   const groupSnap = await db
@@ -2056,6 +2045,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
