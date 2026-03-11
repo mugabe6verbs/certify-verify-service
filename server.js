@@ -678,7 +678,7 @@ app.options("*", cors(corsOptions))
      const orgData = orgSnap.data() || {}
   if (
   !String(data.recipientName || '').trim() ||
-  !String(data.courseTitle || '').trim() ||
+  
   !String(orgData.name || '').trim()
 ) {
   throw new Error('MISSING_REQUIRED_FIELDS')
@@ -2052,6 +2052,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
