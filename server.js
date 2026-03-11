@@ -1403,7 +1403,8 @@ if (
   }
 }
     //  Return only public-safe fields
-    const publicPayload = {
+   
+const publicPayload = {
   serial: cert.serial,
   recipientName: cert.recipientName,
   courseTitle: cert.courseTitle,
@@ -1428,17 +1429,23 @@ if (
   sealDataUrl: cert.sealDataUrl || null,
 
   titleText: cert.titleText || "Certificate",
+  titleTransform: cert.titleTransform || "none",
 
   template: cert.template,
+  accentColor: cert.accentColor || null,
+
   brand: cert.brand || null,
   i18n: cert.i18n || {},
+
+  templateVersion: cert.templateVersion || "1.0",
 
   status: finalStatus,
   revokeReason: cert.revokeReason || null,
   revokedAt: cert.revokedAt || null,
   createdAt: cert.createdAt || null,
 }
-     res.set("Cache-Control", "public, max-age=0, s-maxage=300");
+ 
+res.set("Cache-Control", "public, max-age=0, s-maxage=300");
     const response = { ok: true, certificate: publicPayload }
 
 verifyCache.set(rawSerial, response)
@@ -2045,6 +2052,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
