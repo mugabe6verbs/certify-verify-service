@@ -821,7 +821,8 @@ tx.set(orgCertRef, {
   titleText: payload.titleText || null,
   createdAt: payload.createdAt,
   ownerUid: payload.ownerUid,
-  orgId: payload.orgId
+  orgId: payload.orgId,
+  verificationDomain: payload.verificationDomain
 }, { merge: true })
 
   // Global serial registry (verification snapshot)
@@ -2052,6 +2053,7 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
+
 
 
 
