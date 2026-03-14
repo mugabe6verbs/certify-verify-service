@@ -7,7 +7,7 @@ import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
-import LRU from 'lru-cache'
+import { LRUCache } from 'lru-cache'
 import geoip from "geoip-lite"
 
 const {
@@ -127,9 +127,9 @@ function detectCountry(req) {
 }
 
 /* ============== Verification Cache ============== */
-const verifyCache = new LRU({
-  max: 5000, // cache up to 5000 certificates
-  ttl: 1000 * 60 * 5 // 5 minutes
+const verifyCache = new LRUCache({
+  max: 5000,
+  ttl: 1000 * 60 * 5
 })
 
 /* ============== Firebase Admin ============== */
