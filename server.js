@@ -8,6 +8,7 @@ import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
 import LRU from 'lru-cache'
+import geoip from "geoip-lite"
 
 const {
   PORT = 8080,
@@ -95,6 +96,34 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
   const size = Buffer.byteLength(base64, 'base64')
 
   return size <= maxBytes
+}
+
+function detectCountry(req) {
+  try {
+    // 1️⃣ Prefer Cloudflare header
+    const cfCountry = req.headers["cf-ipcountry"]
+
+    if (cfCountry && /^[A-Z]{2}$/.test(cfCountry)) {
+      return cfCountry
+    }
+
+    // 2️⃣ Fallback to IP lookup
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0] ||
+      req.ip ||
+      ""
+
+    const geo = geoip.lookup(ip)
+
+    if (geo && geo.country) {
+      return geo.country
+    }
+
+    return "Unknown"
+
+  } catch {
+    return "Unknown"
+  }
 }
 
 /* ============== Verification Cache ============== */
@@ -1398,7 +1427,7 @@ db.collection('verificationLogs')
     viewedAt: admin.firestore.FieldValue.serverTimestamp(),
     ip: req.ip,
     ua: req.headers['user-agent'] || null,
-    country: req.headers["cf-ipcountry"] || null
+    country: detectCountry(req)
   })
     .catch(() => {})
 })
