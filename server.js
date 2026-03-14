@@ -7,7 +7,7 @@ import helmet from 'helmet'
 import compression from 'compression'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
-import { LRUCache } from 'lru-cache'
+import LRU from 'lru-cache'
 
 const {
   PORT = 8080,
@@ -25,10 +25,11 @@ const {
   VERIFY_CNAME_TARGET = 'custom.getcertifyhq.com',
   ADMIN_PASSWORD 
 } = process.env
-const allowList = (ALLOW_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
+
+const allowList = ALLOW_ORIGINS.split(",")
+  .map(o => o.trim())
   .filter(Boolean)
+
 const FREE_TEMPLATES = ['minimal', 'classic-border']
 
 const PRO_TEMPLATES = [
@@ -95,10 +96,11 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
 
   return size <= maxBytes
 }
+
 /* ============== Verification Cache ============== */
-const verifyCache = new LRUCache({
-  max: 5000,
-  ttl: 1000 * 60 * 5
+const verifyCache = new LRU({
+  max: 5000, // cache up to 5000 certificates
+  ttl: 1000 * 60 * 5 // 5 minutes
 })
 
 /* ============== Firebase Admin ============== */
@@ -456,7 +458,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions))
 app.options("*", cors(corsOptions))
- 
+
  app.use(helmet())
  app.disable('x-powered-by')
 
@@ -1274,7 +1276,17 @@ await db.runTransaction(async (tx) => {
   }
 })
 
+/* ============== VERIFICATION HELPERS ============== */
 
+function looksSuspiciousSerial(serial) {
+  const cleaned = serial.replace(/-/g, "");
+
+  if (/^(.)\1+$/.test(cleaned)) return true;
+
+  if (/^([A-Z0-9]{4})\1{2}$/.test(cleaned)) return true;
+
+  return false;
+}
 
 /* ============== VERIFICATION ============== */
 
@@ -1285,7 +1297,7 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
     }
 
 const rawSerial = String(req.params.serial || '').toUpperCase()
-const ip = req.ip
+const ip = String(req.ip || "unknown").replace(/[:.]/g, "_")
 
 const abuseRef = db.collection('verifyAbuse').doc(ip)
 const abuseSnap = await abuseRef.get()
@@ -1310,29 +1322,28 @@ if (cached) {
     if (!SERIAL_RE.test(rawSerial)) {
       return res.status(400).json({ ok: false, error: 'Invalid format' })
     }
-
+  if (looksSuspiciousSerial(rawSerial)) {
+  return res.status(400).json({ ok: false })
+}
     let cert = null
-const certSnap = await db.collection('certificates').doc(rawSerial).get()
+ const certSnap = await db.collection('certificates').doc(rawSerial).get()
 
 if (certSnap.exists) {
   cert = certSnap.data()
 }
-if (!cert) {
-
-  // Fallback search across all organizations
-  const groupSnap = await db
-    .collectionGroup('certificates')
-    .where(admin.firestore.FieldPath.documentId(), '==', rawSerial)
-    .limit(1)
+  if (!cert) {
+  // Fallback lookup using global serial registry (faster than collectionGroup)
+  const lookupSnap = await db
+    .collection('certificateLookup')
+    .doc(rawSerial)
     .get()
 
-  if (!groupSnap.empty) {
-    const doc = groupSnap.docs[0]
-    cert = doc.data()
+  if (lookupSnap.exists) {
+    cert = lookupSnap.data()
 
-    // recover orgId from path if missing
-    if (!cert.orgId) {
-      cert.orgId = doc.ref.parent.parent.id
+    // Ensure serial is present (safety for legacy entries)
+    if (!cert.serial) {
+      cert.serial = rawSerial
     }
   }
 }
@@ -1379,14 +1390,16 @@ if (
 
     //  Log verification server-side
    setImmediate(() => {
-  db.collection('verificationLogs')
-    .add({
-      serial: rawSerial,
-      orgId: cert.orgId || null,
-      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
-      ip: req.ip,
-      ua: req.headers['user-agent'] || null
-    })
+if (abuseData.count && abuseData.count > 200) return
+db.collection('verificationLogs')
+  .add({
+    serial: rawSerial,
+    orgId: cert.orgId || null,
+    viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    ip: req.ip,
+    ua: req.headers['user-agent'] || null,
+    country: req.headers["cf-ipcountry"] || null
+  })
     .catch(() => {})
 })
       
@@ -1404,8 +1417,7 @@ if (
   }
 }
     //  Return only public-safe fields
-   
-const publicPayload = {
+   const publicPayload = {
   serial: cert.serial,
   recipientName: cert.recipientName,
   courseTitle: cert.courseTitle,
@@ -1445,11 +1457,12 @@ const publicPayload = {
   revokedAt: cert.revokedAt || null,
   createdAt: cert.createdAt || null,
 }
- 
-res.set("Cache-Control", "public, max-age=0, s-maxage=300");
+     res.set("Cache-Control", "public, max-age=0, s-maxage=300");
     const response = { ok: true, certificate: publicPayload }
 
-verifyCache.set(rawSerial, response)
+if (finalStatus === "valid" || finalStatus === "revoked") {
+  verifyCache.set(rawSerial, response)
+}
 
 return res.json(response)
 
@@ -2053,16 +2066,6 @@ app.listen(PORT, () => {
   console.log(`Allowed origins: ${allowList.join(', ') || '(none)'}`)
   console.log(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`)
 })
-
-
-
-
-
-
-
-
-
-
 
 
 
