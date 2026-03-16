@@ -1454,13 +1454,20 @@ if (
   try {
 
     await db.collection('verificationLogs').add({
-      serial: rawSerial,
-      orgId: cert.orgId || null,
-      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
-      ip: req.ip,
-      ua: req.headers['user-agent'] || null,
-      country: detectCountry(req)
-    })
+  serial: rawSerial,
+  orgId: cert.orgId || null,
+
+  recipientName: cert.recipientName || null,
+  courseTitle: cert.courseTitle || null,
+  orgName: cert.orgName || null,
+
+  viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+
+  ip: req.ip,
+  ua: req.headers['user-agent'] || null,
+
+  country: detectCountry(req)
+})
 
     // ================= ANALYTICS UPDATE =================
     if (cert.orgId) {
