@@ -896,6 +896,20 @@ tx.set(lookupRef, {
  // Safe post-transaction log
  console.log("ISSUED CERT:", { uid, serial: result.serial })
 
+ // ================= ANALYTICS UPDATE =================
+try {
+  const orgId = req.user?.uid
+const analyticsRef = db.collection("orgAnalytics").doc(orgId)
+
+  await analyticsRef.set({
+    totalIssued: admin.firestore.FieldValue.increment(1),
+    issuedThisMonth: admin.firestore.FieldValue.increment(1)
+  }, { merge: true })
+
+} catch (err) {
+  console.warn("⚠ analytics update failed (issue):", err?.message || err)
+}
+
    const response = {
   ok: true,
   serial: result.serial,
@@ -1186,7 +1200,22 @@ await db.runTransaction(async (tx) => {
   })
 })
 
-    return res.json({ ok: true })
+   // ================= ANALYTICS UPDATE =================
+try {
+  const lookupSnap = await db.collection('certificateLookup').doc(normalizedSerial).get()
+
+  if (lookupSnap.exists) {
+    const { orgId } = lookupSnap.data()
+
+    await db.collection("orgAnalytics").doc(orgId).set({
+      revoked: admin.firestore.FieldValue.increment(1)
+    }, { merge: true })
+  }
+} catch (err) {
+  console.warn("⚠ analytics update failed (revoke):", err?.message || err)
+}
+
+return res.json({ ok: true })
 
   } catch (e) {
     if (e.message === 'NOT_FOUND') {
@@ -1418,18 +1447,37 @@ if (
 }
 
     //  Log verification server-side
-   setImmediate(() => {
-if (abuseData.count && abuseData.count > 200) return
-db.collection('verificationLogs')
-  .add({
-    serial: rawSerial,
-    orgId: cert.orgId || null,
-    viewedAt: admin.firestore.FieldValue.serverTimestamp(),
-    ip: req.ip,
-    ua: req.headers['user-agent'] || null,
-    country: detectCountry(req)
-  })
-    .catch(() => {})
+   setImmediate(async () => {
+
+  if (abuseData.count && abuseData.count > 200) return
+
+  try {
+
+    await db.collection('verificationLogs').add({
+      serial: rawSerial,
+      orgId: cert.orgId || null,
+      viewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      ip: req.ip,
+      ua: req.headers['user-agent'] || null,
+      country: detectCountry(req)
+    })
+
+    // ================= ANALYTICS UPDATE =================
+    if (cert.orgId) {
+
+      const analyticsRef = db.collection("orgAnalytics").doc(cert.orgId)
+
+      await analyticsRef.set({
+        totalVerifications: admin.firestore.FieldValue.increment(1),
+        verificationsThisMonth: admin.firestore.FieldValue.increment(1)
+      }, { merge: true })
+
+    }
+
+  } catch (err) {
+    console.warn("⚠ verification analytics failed:", err?.message || err)
+  }
+
 })
       
     // Detect expiry
