@@ -697,6 +697,11 @@ app.options("*", cors(corsOptions))
       if (!userSnap.exists) {
   throw new Error('PRO_REQUIRED')
   }
+
+  
+if (userData.status !== "approved") {
+  throw new Error("ACCOUNT_NOT_APPROVED")
+}
       const orgId = userData.orgId || uid
 
       const orgRef = db.collection('orgs').doc(orgId)
@@ -843,6 +848,7 @@ tx.set(orgCertRef, {
   serial,
   recipientName: payload.recipientName,
   courseTitle: payload.courseTitle,
+  achievementText: payload.achievementText || null,
   orgName: payload.orgName,
   status: payload.status,
   template: payload.template,
@@ -864,8 +870,10 @@ tx.set(lookupRef, {
 
   orgName: payload.orgName,
   recipientName: payload.recipientName,
-  courseTitle: payload.courseTitle,
 
+  courseTitle: payload.courseTitle,
+  achievementText: payload.achievementText || null,
+  
   issueDate: payload.issueDate || null,
   expiryDate: payload.expiryDate || null,
 
@@ -895,21 +903,20 @@ tx.set(lookupRef, {
     
  // Safe post-transaction log
  console.log("ISSUED CERT:", { uid, serial: result.serial })
-
- // ================= ANALYTICS UPDATE =================
+// ================= ANALYTICS UPDATE =================
 try {
-  const orgId = req.user?.uid
-const analyticsRef = db.collection("orgAnalytics").doc(orgId)
+  const userSnap = await db.collection('users').doc(uid).get()
+  const orgId = userSnap.data()?.orgId || uid
+
+  const analyticsRef = db.collection("orgAnalytics").doc(orgId)
 
   await analyticsRef.set({
-    totalIssued: admin.firestore.FieldValue.increment(1),
-    issuedThisMonth: admin.firestore.FieldValue.increment(1)
+    totalIssued: admin.firestore.FieldValue.increment(1)
   }, { merge: true })
 
 } catch (err) {
   console.warn("⚠ analytics update failed (issue):", err?.message || err)
 }
-
    const response = {
   ok: true,
   serial: result.serial,
@@ -931,7 +938,12 @@ return res.json(response)
     if (e.message === 'PRO_REQUIRED') {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
     }
-      
+      if (e.message === 'ACCOUNT_NOT_APPROVED') {
+  return res.status(403).json({
+    ok: false,
+    error: 'Account not approved yet'
+  })
+}
 if (e.message === 'MISSING_REQUIRED_FIELDS') {
   return res.status(400).json({
     ok: false,
@@ -988,6 +1000,10 @@ app.post(
    }
 
       const userData = userSnap.data() || {}
+      
+if (userData.status !== "approved") {
+  throw new Error("ACCOUNT_NOT_APPROVED")
+}
 
       const rawProUntil = userData.proUntil
 
@@ -1002,7 +1018,12 @@ app.post(
    if (!proUntil || Date.now() >= proUntil) {
   throw new Error("PRO_REQUIRED")
    }
-
+if (e.message === 'ACCOUNT_NOT_APPROVED') {
+  return res.status(403).json({
+    ok: false,
+    error: 'Account not approved yet'
+  })
+}
   const orgId = userData.orgId || uid
         // Generate all serials (READ ONLY)
         const serials = []
@@ -1357,7 +1378,9 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
 const rawSerial = String(req.params.serial || '').toUpperCase()
 const ip = String(req.ip || "unknown").replace(/[:.]/g, "_")
 
-const abuseRef = db.collection('verifyAbuse').doc(ip)
+const abuseKey = `${rawSerial}_${ip}`
+
+const abuseRef = db.collection('verifyAbuse').doc(abuseKey)
 const abuseSnap = await abuseRef.get()
 const abuseData = abuseSnap.data() || {}
 
@@ -1453,12 +1476,13 @@ if (
 
   try {
 
-    await db.collection('verificationLogs').add({
+  await db.collection('verificationLogs').add({
   serial: rawSerial,
   orgId: cert.orgId || null,
 
   recipientName: cert.recipientName || null,
   courseTitle: cert.courseTitle || null,
+  achievementText: cert.achievementText || null,
   orgName: cert.orgName || null,
 
   viewedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1466,7 +1490,12 @@ if (
   ip: req.ip,
   ua: req.headers['user-agent'] || null,
 
-  country: detectCountry(req)
+  country: detectCountry(req) || "Unknown",
+
+  // ✅ TTL FIELD (90 days)
+  expiresAt: admin.firestore.Timestamp.fromMillis(
+    Date.now() + 1000 * 60 * 60 * 24 * 90
+  )
 })
 
     // ================= ANALYTICS UPDATE =================
@@ -1474,10 +1503,9 @@ if (
 
       const analyticsRef = db.collection("orgAnalytics").doc(cert.orgId)
 
-      await analyticsRef.set({
-        totalVerifications: admin.firestore.FieldValue.increment(1),
-        verificationsThisMonth: admin.firestore.FieldValue.increment(1)
-      }, { merge: true })
+     await analyticsRef.set({
+  totalVerifications: admin.firestore.FieldValue.increment(1)
+}, { merge: true })
 
     }
 
