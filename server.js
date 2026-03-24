@@ -1589,11 +1589,12 @@ return res.json(response)
 
 
 /* ============== Onboarding notify ============== */
-app.post('/api/onboarding/notify', async (req, res) => {
+
+ 
+    app.post('/api/onboarding/notify', async (req, res) => {
   try {
     const { organizationName, website, role, contactName, email } = req.body
 
-    //  Basic validation
     if (!organizationName || !role || !contactName || !email) {
       return res.status(400).json({
         ok: false,
@@ -1601,32 +1602,43 @@ app.post('/api/onboarding/notify', async (req, res) => {
       })
     }
 
-   await resend.emails.send({
-  from: 'GetCertifyHQ <onboarding@mail.getcertifyhq.com>',
-  to: ['verbsmugabe@gmail.com'], 
-  subject: 'New Organization Approval Request',
- 
-  html: `
-  <div style="font-family: Arial; padding: 20px;">
-    <h2 style="color:#6366f1;">New Organization Request</h2>
+    await resend.emails.send({
+      from: 'GetCertifyHQ <onboarding@mail.getcertifyhq.com>',
+      to: ['verbsmugabe@gmail.com'],
+      subject: 'New Organization Approval Request',
+      html: `
+        <div style="font-family: Arial; padding: 20px;">
+          <h2 style="color:#6366f1;">New Organization Request</h2>
 
-    <p>A new organization has requested access to GetCertifyHQ.</p>
+          <p>A new organization has requested access to GetCertifyHQ.</p>
 
-    <hr/>
+          <hr/>
 
-    <p><strong>Organization:</strong> ${organizationName}</p>
-    <p><strong>Website:</strong> ${website || 'N/A'}</p>
-    <p><strong>Role:</strong> ${role}</p>
-    <p><strong>Contact:</strong> ${contactName}</p>
-    <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Organization:</strong> ${organizationName}</p>
+          <p><strong>Website:</strong> ${website || 'N/A'}</p>
+          <p><strong>Role:</strong> ${role}</p>
+          <p><strong>Contact:</strong> ${contactName}</p>
+          <p><strong>Email:</strong> ${email}</p>
 
-    <hr/>
+          <hr/>
 
-    <p style="font-size: 12px; color: #9ca3af;">
-      Review this request in your admin panel.
-    </p>
-  </div>
-`
+          <p style="font-size: 12px; color: #9ca3af;">
+            Review this request in your admin panel.
+          </p>
+        </div>
+      `
+    })
+
+    //  VERY IMPORTANT — send response
+    return res.json({ ok: true })
+
+  } catch (e) {
+    console.error('ONBOARDING EMAIL ERROR:', e)
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to send onboarding email'
+    })
+  }
 })
 
 /* ============== Admin rescue ============== */
