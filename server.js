@@ -9,6 +9,9 @@ import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
 import { LRUCache } from 'lru-cache'
 import geoip from "geoip-lite"
+import { Resend } from 'resend'
+
+const resend = new Resend(process.env.RESEND_API_KEY)
 
 const {
   PORT = 8080,
@@ -1582,6 +1585,48 @@ return res.json(response)
     console.error('VERIFY ERROR', e)
     return res.status(500).json({ ok: false })
   }
+})
+
+
+/* ============== Onboarding notify ============== */
+app.post('/api/onboarding/notify', async (req, res) => {
+  try {
+    const { organizationName, website, role, contactName, email } = req.body
+
+    //  Basic validation
+    if (!organizationName || !role || !contactName || !email) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing required fields'
+      })
+    }
+
+   await resend.emails.send({
+  from: 'GetCertifyHQ <onboarding@mail.getcertifyhq.com>',
+  to: ['verbsmugabe@gmail.com'], 
+  subject: 'New Organization Approval Request',
+ 
+  html: `
+  <div style="font-family: Arial; padding: 20px;">
+    <h2 style="color:#6366f1;">New Organization Request</h2>
+
+    <p>A new organization has requested access to GetCertifyHQ.</p>
+
+    <hr/>
+
+    <p><strong>Organization:</strong> ${organizationName}</p>
+    <p><strong>Website:</strong> ${website || 'N/A'}</p>
+    <p><strong>Role:</strong> ${role}</p>
+    <p><strong>Contact:</strong> ${contactName}</p>
+    <p><strong>Email:</strong> ${email}</p>
+
+    <hr/>
+
+    <p style="font-size: 12px; color: #9ca3af;">
+      Review this request in your admin panel.
+    </p>
+  </div>
+`
 })
 
 /* ============== Admin rescue ============== */
