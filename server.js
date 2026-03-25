@@ -1603,7 +1603,7 @@ return res.json(response)
     }
 
     await resend.emails.send({
-      from: 'onboarding@resend.dev',
+      from: 'onboarding@mail.getcertifyhq.com',
       to: ['verbsmugabe@gmail.com'],
       subject: 'New Organization Approval Request',
       html: `
