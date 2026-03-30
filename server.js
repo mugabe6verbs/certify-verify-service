@@ -1632,7 +1632,7 @@ return res.json(response)
       `
     })
 
-    //  VERY IMPORTANT — send response
+    
     return res.json({ ok: true })
 
   } catch (e) {
@@ -1643,6 +1643,52 @@ return res.json(response)
     })
   }
 })
+
+      
+/* ============== Onboarding end point ============== */
+app.post("/api/onboarding", async (req, res) => {
+  try {
+    const { organizationName, website, contactName, role } = req.body
+
+    // 🔒 Validate input
+    if (!organizationName || !contactName || !role) {
+      return res.status(400).json({ error: "Missing required fields" })
+    }
+
+    // 🔐 Get user from token (IMPORTANT)
+    const authHeader = req.headers.authorization
+    if (!authHeader) {
+      return res.status(401).json({ error: "Unauthorized" })
+    }
+
+    const token = authHeader.split("Bearer ")[1]
+    const decoded = await admin.auth().verifyIdToken(token)
+
+    const uid = decoded.uid
+
+    //  Write to Firestore
+    await admin.firestore().collection("users").doc(uid).set(
+      {
+        onboardingCompleted: true,
+        status: "pending",
+
+        organizationName,
+        website: website || null,
+        contactName,
+        role,
+
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error("Onboarding error:", err)
+    res.status(500).json({ error: "Internal server error" })
+  }
+})
+
 
 /* ============== Admin rescue ============== */
 
