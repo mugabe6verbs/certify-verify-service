@@ -705,6 +705,7 @@ app.options("*", cors(corsOptions))
 if (userData.status !== "approved") {
   throw new Error("ACCOUNT_NOT_APPROVED")
 }
+
       const orgId = userData.orgId || uid
 
       const orgRef = db.collection('orgs').doc(orgId)
@@ -1007,6 +1008,8 @@ app.post(
 if (userData.status !== "approved") {
   throw new Error("ACCOUNT_NOT_APPROVED")
 }
+
+
 
       const rawProUntil = userData.proUntil
 
