@@ -1591,60 +1591,6 @@ return res.json(response)
 })
 
 
-/* ============== Onboarding notify ============== */
-
- 
-    app.post('/api/onboarding/notify', async (req, res) => {
-  try {
-    const { organizationName, website, role, contactName, email } = req.body
-
-    if (!organizationName || !role || !contactName || !email) {
-      return res.status(400).json({
-        ok: false,
-        error: 'Missing required fields'
-      })
-    }
-
-    await resend.emails.send({
-      from: 'onboarding@mail.getcertifyhq.com',
-      to: ['verbsmugabe@gmail.com'],
-      subject: 'New Organization Approval Request',
-      html: `
-        <div style="font-family: Arial; padding: 20px;">
-          <h2 style="color:#6366f1;">New Organization Request</h2>
-
-          <p>A new organization has requested access to GetCertifyHQ.</p>
-
-          <hr/>
-
-          <p><strong>Organization:</strong> ${organizationName}</p>
-          <p><strong>Website:</strong> ${website || 'N/A'}</p>
-          <p><strong>Role:</strong> ${role}</p>
-          <p><strong>Contact:</strong> ${contactName}</p>
-          <p><strong>Email:</strong> ${email}</p>
-
-          <hr/>
-
-          <p style="font-size: 12px; color: #9ca3af;">
-            Review this request in your admin panel.
-          </p>
-        </div>
-      `
-    })
-
-    
-    return res.json({ ok: true })
-
-  } catch (e) {
-    console.error('ONBOARDING EMAIL ERROR:', e)
-    return res.status(500).json({
-      ok: false,
-      error: 'Failed to send onboarding email'
-    })
-  }
-})
-
-      
 /* ============== Onboarding end point ============== */
 app.post("/api/onboarding", async (req, res) => {
   try {
@@ -1682,13 +1628,104 @@ app.post("/api/onboarding", async (req, res) => {
       { merge: true }
     )
 
+    try {
+      await resend.emails.send({
+        from: "onboarding@mail.getcertifyhq.com", 
+        to: ["verbsmugabe@gmail.com"], 
+        subject: "New Organization Approval Request",
+        html: `
+          <div style="font-family: Arial; padding: 20px;">
+            <h2 style="color:#6366f1;">New Organization Request</h2>
+
+            <p><strong>Organization:</strong> ${organizationName}</p>
+            <p><strong>Website:</strong> ${website || "N/A"}</p>
+            <p><strong>Role:</strong> ${role}</p>
+            <p><strong>Contact:</strong> ${contactName}</p>
+            <p><strong>Email:</strong> ${decoded.email}</p>
+          </div>
+        `,
+      })
+    } catch (e) {
+      console.error("Email send failed:", e)
+    }
+
+    //  response stays LAST
     res.json({ success: true })
+
   } catch (err) {
     console.error("Onboarding error:", err)
     res.status(500).json({ error: "Internal server error" })
   }
 })
 
+/* ============== Admin Approval Endpoint ============== */
+app.post("/api/admin/approve-user", async (req, res) => {
+  try {
+    const { uid, action } = req.body // action = "approved" | "rejected"
+
+    if (!uid || !action) {
+      return res.status(400).json({ error: "Missing data" })
+    }
+
+    // 🔐 Verify admin
+    const authHeader = req.headers.authorization
+    if (!authHeader) {
+      return res.status(401).json({ error: "Unauthorized" })
+    }
+
+    const token = authHeader.split("Bearer ")[1]
+    const decoded = await admin.auth().verifyIdToken(token)
+
+    // 🔒 Check admin flag (VERY IMPORTANT)
+    const adminDoc = await admin.firestore().collection("users").doc(decoded.uid).get()
+
+    if (!adminDoc.exists || adminDoc.data().role !== "Admin") {
+      return res.status(403).json({ error: "Forbidden" })
+    }
+
+    // ✅ Update user status
+    await admin.firestore().collection("users").doc(uid).set(
+      {
+        status: action,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+
+    //  SEND EMAIL TO USER
+    const userRecord = await admin.auth().getUser(uid)
+
+    try {
+      await resend.emails.send({
+        from: "onboarding@mail.getcertifyhq.com",
+        to: [userRecord.email],
+        subject:
+          action === "approved"
+            ? "Your account has been approved"
+            : "Your application was not approved",
+        html: `
+          <div style="font-family: Arial; padding: 20px;">
+            <h2>${action === "approved" ? "Approved ✅" : "Not Approved ❌"}</h2>
+            <p>
+              ${
+                action === "approved"
+                  ? "You can now access the platform and issue certificates."
+                  : "Please contact support for more information."
+              }
+            </p>
+          </div>
+        `,
+      })
+    } catch (e) {
+      console.error("User email failed:", e)
+    }
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error("Admin approval error:", err)
+    res.status(500).json({ error: "Internal server error" })
+  }
+})
 
 /* ============== Admin rescue ============== */
 
