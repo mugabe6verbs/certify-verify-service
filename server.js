@@ -2178,9 +2178,9 @@ app.post("/pesapal/ipn", ipnLimiter, (req, res) =>
 
 /* ============== Admin Verification (break-glass) ============== */
  app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ ok: false })
-  }
+ // if (process.env.NODE_ENV === 'production') {
+//   return res.status(404).json({ ok: false })
+// }
 
   const { idToken, password } = req.body || {}
   if (!idToken || password !== ADMIN_PASSWORD) {
