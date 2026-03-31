@@ -1658,29 +1658,20 @@ app.post("/api/onboarding", async (req, res) => {
   }
 })
 
+
 /* ============== Admin Approval Endpoint ============== */
 app.post("/api/admin/approve-user", async (req, res) => {
+  const adminUser = await requireAdminAuth(req, res)
+  if (!adminUser) return
+
   try {
-    const { uid, action } = req.body // action = "approved" | "rejected"
+    const { uid, action } = req.body
 
     if (!uid || !action) {
-      return res.status(400).json({ error: "Missing data" })
-    }
-
-    // 🔐 Verify admin
-    const authHeader = req.headers.authorization
-    if (!authHeader) {
-      return res.status(401).json({ error: "Unauthorized" })
-    }
-
-    const token = authHeader.split("Bearer ")[1]
-    const decoded = await admin.auth().verifyIdToken(token)
-
-    // 🔒 Check admin flag (VERY IMPORTANT)
-    const adminDoc = await admin.firestore().collection("users").doc(decoded.uid).get()
-
-    if (!adminDoc.exists || adminDoc.data().role !== "Admin") {
-      return res.status(403).json({ error: "Forbidden" })
+      return res.status(400).json({
+        success: false,
+        error: "Missing data",
+      })
     }
 
     // ✅ Update user status
@@ -1692,7 +1683,7 @@ app.post("/api/admin/approve-user", async (req, res) => {
       { merge: true }
     )
 
-    //  SEND EMAIL TO USER
+    // 📧 Send email
     const userRecord = await admin.auth().getUser(uid)
 
     try {
@@ -1720,13 +1711,14 @@ app.post("/api/admin/approve-user", async (req, res) => {
       console.error("User email failed:", e)
     }
 
-    res.json({ success: true })
+    return res.json({ success: true })
+
   } catch (err) {
     console.error("Admin approval error:", err)
-    res.status(500).json({
-  success: false,
-  error: "Internal server error"
-})
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    })
   }
 })
 
