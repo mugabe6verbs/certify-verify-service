@@ -1723,7 +1723,10 @@ app.post("/api/admin/approve-user", async (req, res) => {
     res.json({ success: true })
   } catch (err) {
     console.error("Admin approval error:", err)
-    res.status(500).json({ error: "Internal server error" })
+    res.status(500).json({
+  success: false,
+  error: "Internal server error"
+})
   }
 })
 
