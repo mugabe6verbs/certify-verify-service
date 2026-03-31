@@ -101,6 +101,48 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
   return size <= maxBytes
 }
 
+async function sendProActivationEmail(userRecord, planId) {
+  const displayName = userRecord.displayName || userRecord.email
+
+  const html = `
+  <div style="font-family: Arial, sans-serif; background-color: #f9fafb; padding: 40px 0;">
+    <div style="max-width: 600px; margin: auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
+
+      <div style="background: #0f172a; padding: 20px; text-align: center;">
+        <h1 style="color: #ffffff; margin: 0;">GetCertifyHQ</h1>
+      </div>
+
+      <div style="padding: 30px;">
+        <p>Hello ${displayName},</p>
+
+        <h2>Your Pro plan is now active</h2>
+
+        <p>
+          Your payment has been successfully processed and your subscription is now active.
+          You can now access all premium features on GetCertifyHQ.
+        </p>
+
+        <p style="margin-top:20px;">
+          For any questions, contact
+          <a href="mailto:support@getcertifyhq.com">support@getcertifyhq.com</a>.
+        </p>
+        <p style="margin-top: 24px;">
+  Thank you,<br/>
+  <strong>GetCertifyHQ Team</strong>
+</p>
+      </div>
+    </div>
+  </div>
+  `
+
+  await resend.emails.send({
+    from: "GetCertifyHQ <billing@mail.getcertifyhq.com>",
+    to: [userRecord.email],
+    subject: "Your GetCertifyHQ Pro plan is now active",
+    html,
+  })
+}
+
 function detectCountry(req) {
   try {
     // 1️⃣ Prefer Cloudflare header
@@ -1646,18 +1688,42 @@ app.post("/api/onboarding", async (req, res) => {
         `,
       })
     } catch (e) {
-      console.error("Email send failed:", e)
+      console.error("Admin onboarding email failed:", e)
     }
 
-    //  response stays LAST
-    res.json({ success: true })
+    //  USER EMAIL 
+    try {
+      const displayName = contactName || decoded.email
+
+      await resend.emails.send({
+        from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
+        to: [decoded.email],
+        subject: "We’ve received your application — GetCertifyHQ",
+        html: `
+          <div style="font-family: Arial; padding: 20px;">
+            <h2>We’ve received your application</h2>
+            <p>Hello ${displayName},</p>
+            <p>Your organization is under review. We’ll notify you once a decision is made.</p>
+            <p>Support: support@getcertifyhq.com</p>
+            <p style="margin-top: 24px;">
+           Thank you,<br/>
+          <strong>GetCertifyHQ Team</strong>
+        </p>
+          </div>
+          `,
+      })
+    } catch (e) {
+      console.error("User onboarding email failed:", e)
+    }
+
+    
+    return res.json({ success: true })
 
   } catch (err) {
     console.error("Onboarding error:", err)
     res.status(500).json({ error: "Internal server error" })
   }
 })
-
 
 /* ============== Admin Approval Endpoint ============== */
 app.post("/api/admin/approve-user", async (req, res) => {
@@ -1674,6 +1740,13 @@ app.post("/api/admin/approve-user", async (req, res) => {
       })
     }
 
+      if (!["approved", "rejected"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid action",
+      })
+    }
+
     // ✅ Update user status
     await admin.firestore().collection("users").doc(uid).set(
       {
@@ -1683,30 +1756,89 @@ app.post("/api/admin/approve-user", async (req, res) => {
       { merge: true }
     )
 
-    // 📧 Send email
-    const userRecord = await admin.auth().getUser(uid)
+      // 🧾 Log admin action
+    console.log("ADMIN ACTION:", {
+      adminUid: adminUser.uid,
+      targetUid: uid,
+      action,
+      timestamp: new Date().toISOString(),
+    })
 
-    try {
-      await resend.emails.send({
-        from: "onboarding@mail.getcertifyhq.com",
-        to: [userRecord.email],
-        subject:
-          action === "approved"
-            ? "Your account has been approved"
-            : "Your application was not approved",
-        html: `
-          <div style="font-family: Arial; padding: 20px;">
-            <h2>${action === "approved" ? "Approved ✅" : "Not Approved ❌"}</h2>
-            <p>
-              ${
-                action === "approved"
-                  ? "You can now access the platform and issue certificates."
-                  : "Please contact support for more information."
-              }
-            </p>
-          </div>
-        `,
-      })
+    // 📧 Send email
+const userRecord = await admin.auth().getUser(uid)
+const displayName = userRecord.displayName || userRecord.email
+try {
+  const isApproved = action === "approved"
+
+  const html = `
+  <div style="font-family: Arial, sans-serif; background-color: #f9fafb; padding: 40px 0;">
+    <div style="max-width: 600px; margin: auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
+
+      <!-- Header -->
+      <div style="background: #0f172a; padding: 20px; text-align: center;">
+        <h1 style="color: #ffffff; margin: 0; font-size: 20px;">
+          GetCertifyHQ
+        </h1>
+      </div>
+
+      <!-- Body -->
+      <div style="padding: 30px;">
+        <p style="color: #374151; font-size: 14px;">
+          Hello ${userRecord.email},
+        </p>
+
+        <h2 style="color: #111827; margin: 10px 0;">
+          ${
+            isApproved
+              ? "Your account has been approved"
+              : "Application status update"
+          }
+        </h2>
+
+        <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
+          ${
+            isApproved
+              ? "We’re pleased to inform you that your organization has been successfully verified and approved. You can now start issuing secure, verifiable certificates on GetCertifyHQ."
+              : "Thank you for your interest in GetCertifyHQ. After careful review, we’re unable to approve your organization at this time."
+          }
+        </p>
+
+        ${
+          !isApproved
+            ? `
+        <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
+          If you believe this decision was made in error or would like further clarification, please reach out to our support team.
+        </p>
+        `
+            : ""
+        }
+
+        <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">
+          For any questions or assistance, contact us at
+          <a href="mailto:support@getcertifyhq.com" style="color:#2563eb;">
+            support@getcertifyhq.com
+          </a>.
+        </p>
+        <p style="margin-top: 24px;">
+  Thank you,<br/>
+  <strong>GetCertifyHQ Team</strong>
+</p>
+      </div>
+
+    </div>
+  </div>
+  `
+
+  await resend.emails.send({
+    from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
+    to: [userRecord.email],
+    subject: isApproved
+      ? "Your GetCertifyHQ account has been approved"
+      : "Update on your GetCertifyHQ application",
+    html,
+  })
+
+
     } catch (e) {
       console.error("User email failed:", e)
     }
@@ -1817,6 +1949,14 @@ await userRef.set(
   { merge: true }
 )
 
+try {
+  const userRecord = await admin.auth().getUser(uid)
+
+  await sendProActivationEmail(userRecord, planId)
+
+} catch (e) {
+  console.error("Pro activation email failed:", e)
+}
 
     //  AUDIT LOG (immutable, attributed)
     await logAdminAction({
@@ -2135,6 +2275,19 @@ const proUntil = addInterval(base, interval)
           { merge: true }
         )
 
+   if (!orderSnap.get("emailSent")) { 
+    try {
+  const userRecord = await admin.auth().getUser(uid)
+
+  await sendProActivationEmail(userRecord, finalPlanId)
+ await orderRef.set(
+      { emailSent: true },
+      { merge: true }
+    )
+} catch (e) {
+  console.error("Pro activation email failed:", e)
+}
+   }
         await orderRef.set(
           {
             status: "paid",
@@ -2178,9 +2331,9 @@ app.post("/pesapal/ipn", ipnLimiter, (req, res) =>
 
 /* ============== Admin Verification (break-glass) ============== */
  app.post('/api/admin/verify', adminVerifyLimiter, async (req, res) => {
- // if (process.env.NODE_ENV === 'production') {
-//   return res.status(404).json({ ok: false })
-// }
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ ok: false })
+  }
 
   const { idToken, password } = req.body || {}
   if (!idToken || password !== ADMIN_PASSWORD) {
