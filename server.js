@@ -27,7 +27,7 @@ const {
   PESA_BASE = 'demo',  // 'demo' | 'live'
   PESA_IPN_ID,
   VERIFY_CNAME_TARGET = 'custom.getcertifyhq.com',
-  ADMIN_PASSWORD 
+  
 } = process.env
 
 const allowList = ALLOW_ORIGINS.split(",")
@@ -100,7 +100,6 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
 
   return size <= maxBytes
 }
-
 async function sendProActivationEmail(userRecord, planId) {
   const displayName = userRecord.displayName || userRecord.email
 
@@ -113,23 +112,29 @@ async function sendProActivationEmail(userRecord, planId) {
       </div>
 
       <div style="padding: 30px;">
-        <p>Hello ${displayName},</p>
+        <p>${displayName},</p>
 
-        <h2>Your Pro plan is now active</h2>
+        <h2 style="margin-top: 0;">Subscription Activated</h2>
 
         <p>
-          Your payment has been successfully processed and your subscription is now active.
-          You can now access all premium features on GetCertifyHQ.
+          Your subscription has been successfully activated.
+        </p>
+
+        <p>
+          Your organization now has access to certificate issuance and public verification capabilities.
+          Certificates issued through your account will be permanently recorded and independently verifiable.
         </p>
 
         <p style="margin-top:20px;">
-          For any questions, contact
+          For assistance, contact
           <a href="mailto:support@getcertifyhq.com">support@getcertifyhq.com</a>.
         </p>
+
         <p style="margin-top: 24px;">
-  Thank you,<br/>
-  <strong>GetCertifyHQ Team</strong>
-</p>
+          —<br/>
+          <strong>GetCertifyHQ</strong><br/>
+          Certificate Infrastructure
+        </p>
       </div>
     </div>
   </div>
@@ -138,7 +143,7 @@ async function sendProActivationEmail(userRecord, planId) {
   await resend.emails.send({
     from: "GetCertifyHQ <billing@mail.getcertifyhq.com>",
     to: [userRecord.email],
-    subject: "Your GetCertifyHQ Pro plan is now active",
+    subject: "Subscription Activated",
     html,
   })
 }
@@ -478,7 +483,9 @@ const corsOptions = {
   origin: async (origin, cb) => {
 
     try {
-
+     if (!db) {
+      return cb(new Error("CORS unavailable"))
+}
       // allow server-to-server or curl
       if (!origin) return cb(null, true)
 
@@ -707,7 +714,8 @@ app.options("*", cors(corsOptions))
  const data = req.body || {}
  const idempotencyKey = req.headers['x-idempotency-key']
  if (idempotencyKey) {
-  const keyRef = db.collection('idempotency').doc(String(idempotencyKey))
+  const scopedKey = `${uid}_${idempotencyKey}`
+ const keyRef = db.collection('idempotency').doc(scopedKey)
   const keySnap = await keyRef.get()
 
   if (keySnap.exists) {
@@ -970,7 +978,7 @@ try {
 }
 
 if (idempotencyKey) {
-  await db.collection('idempotency').doc(String(idempotencyKey)).set({
+  await db.collection('idempotency').doc(scopedKey).set({
     ...response,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   })
@@ -1066,12 +1074,7 @@ if (userData.status !== "approved") {
    if (!proUntil || Date.now() >= proUntil) {
   throw new Error("PRO_REQUIRED")
    }
-if (e.message === 'ACCOUNT_NOT_APPROVED') {
-  return res.status(403).json({
-    ok: false,
-    error: 'Account not approved yet'
-  })
-}
+ 
   const orgId = userData.orgId || uid
         // Generate all serials (READ ONLY)
         const serials = []
@@ -1435,11 +1438,14 @@ const abuseData = abuseSnap.data() || {}
 if (abuseData.count && abuseData.count > 200) {
   return res.status(429).json({ ok: false })
 }
-
 await abuseRef.set({
   count: admin.firestore.FieldValue.increment(1),
-  lastSeen: admin.firestore.FieldValue.serverTimestamp()
+  lastSeen: admin.firestore.FieldValue.serverTimestamp(),
+  expiresAt: admin.firestore.Timestamp.fromMillis(
+    Date.now() + 1000 * 60 * 60 * 24 // 24 hours
+  )
 }, { merge: true })
+
     // Check verification cache
 const cached = verifyCache.get(rawSerial)
 if (cached) {
@@ -1596,10 +1602,8 @@ if (
   expiryDate: cert.expiryDate || null,
 
   logoDataUrl: cert.logoDataUrl || null,
-  sigDataUrl: cert.sigDataUrl || null,
-  sigDataUrl2: cert.sigDataUrl2 || null,
-  photoDataUrl: cert.photoDataUrl || null,
-  sealDataUrl: cert.sealDataUrl || null,
+  
+ 
 
   titleText: cert.titleText || "Certificate",
   titleTransform: cert.titleTransform || "none",
@@ -1632,9 +1636,15 @@ return res.json(response)
   }
 })
 
+const onboardingLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false
+})
 
 /* ============== Onboarding end point ============== */
-app.post("/api/onboarding", async (req, res) => {
+app.post("/api/onboarding", onboardingLimiter, async (req, res) => {
   try {
     const { organizationName, website, contactName, role } = req.body
 
@@ -1690,28 +1700,55 @@ app.post("/api/onboarding", async (req, res) => {
     } catch (e) {
       console.error("Admin onboarding email failed:", e)
     }
+// USER EMAIL 
+try {
+  const displayName = contactName || decoded.email
 
-    //  USER EMAIL 
-    try {
-      const displayName = contactName || decoded.email
+  await resend.emails.send({
+    from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
+    to: [decoded.email],
+    subject: "Application Received",
+    html: `
+      <div style="font-family: Arial, sans-serif; background-color: #f9fafb; padding: 40px 0;">
+        <div style="max-width: 600px; margin: auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
 
-      await resend.emails.send({
-        from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
-        to: [decoded.email],
-        subject: "We’ve received your application — GetCertifyHQ",
-        html: `
-          <div style="font-family: Arial; padding: 20px;">
-            <h2>We’ve received your application</h2>
-            <p>Hello ${displayName},</p>
-            <p>Your organization is under review. We’ll notify you once a decision is made.</p>
-            <p>Support: support@getcertifyhq.com</p>
-            <p style="margin-top: 24px;">
-           Thank you,<br/>
-          <strong>GetCertifyHQ Team</strong>
-        </p>
+          <div style="background: #0f172a; padding: 20px; text-align: center;">
+            <h1 style="color: #ffffff; margin: 0;">GetCertifyHQ</h1>
           </div>
-          `,
-      })
+
+          <div style="padding: 30px;">
+            <p>${displayName},</p>
+
+            <h2 style="margin-top: 0;">Application Received</h2>
+
+            <p>
+              Your organization’s application has been received and is currently under review.
+            </p>
+
+            <p>
+              This review process ensures that all issuing organizations meet the requirements for
+              certificate issuance and public verification within the system.
+            </p>
+
+            <p>
+              You will be notified once the review process is complete.
+            </p>
+
+            <p style="margin-top:20px;">
+              For assistance, contact
+              <a href="mailto:support@getcertifyhq.com">support@getcertifyhq.com</a>.
+            </p>
+
+            <p style="margin-top: 24px;">
+              —<br/>
+              <strong>GetCertifyHQ</strong><br/>
+              Certificate Infrastructure
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
+  })
     } catch (e) {
       console.error("User onboarding email failed:", e)
     }
@@ -1764,9 +1801,10 @@ app.post("/api/admin/approve-user", async (req, res) => {
       timestamp: new Date().toISOString(),
     })
 
-    // 📧 Send email
+     // 📧 Send email
 const userRecord = await admin.auth().getUser(uid)
 const displayName = userRecord.displayName || userRecord.email
+
 try {
   const isApproved = action === "approved"
 
@@ -1784,57 +1822,64 @@ try {
       <!-- Body -->
       <div style="padding: 30px;">
         <p style="color: #374151; font-size: 14px;">
-          Hello ${userRecord.email},
+          ${displayName},
         </p>
 
         <h2 style="color: #111827; margin: 10px 0;">
           ${
             isApproved
-              ? "Your account has been approved"
-              : "Application status update"
+              ? "Organization Approved"
+              : "Application Status Update"
           }
         </h2>
 
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
           ${
             isApproved
-              ? "We’re pleased to inform you that your organization has been successfully verified and approved. You can now start issuing secure, verifiable certificates on GetCertifyHQ."
-              : "Thank you for your interest in GetCertifyHQ. After careful review, we’re unable to approve your organization at this time."
+              ? "Your organization has been verified and approved. You may now issue certificates through the system."
+              : "Your organization’s application was not approved at this time following review."
           }
         </p>
 
         ${
-          !isApproved
+          isApproved
             ? `
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
-          If you believe this decision was made in error or would like further clarification, please reach out to our support team.
+          Certificates issued through your account will be permanently recorded and independently verifiable.
         </p>
         `
-            : ""
+            : `
+        <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
+          If you require further clarification, please contact support.
+        </p>
+        `
         }
 
         <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">
-          For any questions or assistance, contact us at
+          For assistance, contact
           <a href="mailto:support@getcertifyhq.com" style="color:#2563eb;">
             support@getcertifyhq.com
           </a>.
         </p>
+
         <p style="margin-top: 24px;">
-  Thank you,<br/>
-  <strong>GetCertifyHQ Team</strong>
-</p>
+          —<br/>
+          <strong>GetCertifyHQ</strong><br/>
+          Certificate Infrastructure
+        </p>
       </div>
 
     </div>
   </div>
   `
 
+
   await resend.emails.send({
     from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
     to: [userRecord.email],
     subject: isApproved
-      ? "Your GetCertifyHQ account has been approved"
-      : "Update on your GetCertifyHQ application",
+      ? "Organization Approved"
+      : "Application Status Update",
     html,
   })
 
