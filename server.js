@@ -871,7 +871,8 @@ if (PRO_TEMPLATES.includes(template)) {
   logoDataUrl: data.logoDataUrl || null,
   sigDataUrl: data.sigDataUrl || null,
   sigDataUrl2: data.sigDataUrl2 || null,
-  
+  signatures: Array.isArray(data.signatures) ? data.signatures : [],
+
    photoDataUrl: data.photoDataUrl || null,
   sealDataUrl: data.sealDataUrl || null,
 
@@ -1615,6 +1616,8 @@ if (
   i18n: cert.i18n || {},
 
   templateVersion: cert.templateVersion || "1.0",
+     
+  signatures: cert.signatures || [],
 
   status: finalStatus,
   revokeReason: cert.revokeReason || null,
