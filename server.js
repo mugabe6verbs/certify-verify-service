@@ -1018,7 +1018,7 @@ if (e.message === 'MISSING_REQUIRED_FIELDS') {
       return res.status(500).json({ ok: false, error: 'Failed to generate unique serial' })
     }
 
-    return res.status(500).json({ ok: false, error: 'Server error' })
+    return res.status(500).json({ ok: false, error: e.message || 'Server error' })
   }
 })
 
