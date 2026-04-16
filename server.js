@@ -529,8 +529,10 @@ const corsOptions = {
   methods: ["GET","POST","OPTIONS","PUT","PATCH","DELETE"],
 
   allowedHeaders: [
-    "Content-Type",
-    "Authorization"
+     "Content-Type",
+    "Authorization",
+    "x-idempotency-key",
+    "X-Requested-With"
   ],
 
   credentials: true,
