@@ -715,9 +715,12 @@ app.options("*", cors(corsOptions))
     }
  const data = req.body || {}
  const idempotencyKey = req.headers['x-idempotency-key']
- if (idempotencyKey) {
-  const scopedKey = `${uid}_${idempotencyKey}`
- const keyRef = db.collection('idempotency').doc(scopedKey)
+let scopedKey = null
+
+if (idempotencyKey) {
+  scopedKey = `${uid}_${idempotencyKey}`
+
+  const keyRef = db.collection('idempotency').doc(scopedKey)
   const keySnap = await keyRef.get()
 
   if (keySnap.exists) {
@@ -980,7 +983,7 @@ try {
   verifyUrl: result.verifyUrl
 }
 
-if (idempotencyKey) {
+if (idempotencyKey && scopedKey) {
   await db.collection('idempotency').doc(scopedKey).set({
     ...response,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
