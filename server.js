@@ -126,7 +126,7 @@ async function sendProActivationEmail(userRecord, planId) {
         </p>
 
         <p style="margin-top:20px;">
-          For assistance, contact
+          For more assistance, contact
           <a href="mailto:support@getcertifyhq.com">support@getcertifyhq.com</a>.
         </p>
 
@@ -1743,7 +1743,7 @@ try {
             </p>
 
             <p style="margin-top:20px;">
-              For assistance, contact
+              For more assistance, contact
               <a href="mailto:support@getcertifyhq.com">support@getcertifyhq.com</a>.
             </p>
 
@@ -1864,7 +1864,7 @@ try {
         }
 
         <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">
-          For assistance, contact
+          For more assistance, contact
           <a href="mailto:support@getcertifyhq.com" style="color:#2563eb;">
             support@getcertifyhq.com
           </a>.
