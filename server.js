@@ -1885,7 +1885,7 @@ try {
         `
             : `
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
-          "If you believe this decision was made in error or would like further clarification, please contact our support team."
+          If you believe this decision was made in error or would like further clarification, please contact our support team.
         </p>
         `
         }
