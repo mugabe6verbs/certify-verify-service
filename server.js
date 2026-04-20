@@ -1872,7 +1872,7 @@ try {
           ${
             isApproved
               ? `<strong>${identity.organization || "Your organization"}</strong> has been verified and approved. You may now issue certificates through the system.`
-              : "Your organization’s application was not approved at this time following review."
+              : `After careful review, <strong>${identity.organization || "your organization"}</strong> does not meet the current requirements for certificate issuance on the platform.`
           }
         </p>
 
@@ -1885,7 +1885,7 @@ try {
         `
             : `
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
-          If you require further clarification, please contact support.
+          "If you believe this decision was made in error or would like further clarification, please contact our support team."
         </p>
         `
         }
