@@ -77,6 +77,30 @@ function generateSerial() {
   return serial
 }
 
+async function getUserIdentity(uid) {
+  if (!db) throw new Error("DB not available")
+
+  const [userRecord, userDoc] = await Promise.all([
+    admin.auth().getUser(uid),
+    db.collection("users").doc(uid).get(),
+  ])
+
+  const data = userDoc.exists ? userDoc.data() : {}
+
+  return {
+    email: userRecord.email,
+
+    name:
+      (data.contactName && String(data.contactName).trim()) ||
+      userRecord.displayName ||
+      userRecord.email,
+
+    organization:
+      (data.organizationName && String(data.organizationName).trim()) ||
+      null,
+  }
+}
+
 function normalizeDomain(input) {
   if (!input) return null
 
@@ -100,8 +124,8 @@ function validateDataUrlSize(dataUrl, maxBytes = 300000) {
 
   return size <= maxBytes
 }
-async function sendProActivationEmail(userRecord, planId) {
-  const displayName = userRecord.displayName || userRecord.email
+async function sendProActivationEmail(uid, planId){
+  const identity = await getUserIdentity(uid)
 
   const html = `
   <div style="font-family: Arial, sans-serif; background-color: #f9fafb; padding: 40px 0;">
@@ -112,7 +136,7 @@ async function sendProActivationEmail(userRecord, planId) {
       </div>
 
       <div style="padding: 30px;">
-        <p>${displayName},</p>
+        <p>${identity.name},</p>
 
         <h2 style="margin-top: 0;">Subscription Activated</h2>
 
@@ -121,8 +145,8 @@ async function sendProActivationEmail(userRecord, planId) {
         </p>
 
         <p>
-          Your organization now has access to certificate issuance and public verification capabilities.
-          Certificates issued through your account will be permanently recorded and independently verifiable.
+          <strong>${identity.organization || "Your organization"}</strong> now has access to certificate issuance.
+          Certificates issued under <strong>${identity.organization || "your account"}</strong> will be permanently recorded and independently verifiable.
         </p>
 
         <p style="margin-top:20px;">
@@ -142,7 +166,7 @@ async function sendProActivationEmail(userRecord, planId) {
 
   await resend.emails.send({
     from: "GetCertifyHQ <billing@mail.getcertifyhq.com>",
-    to: [userRecord.email],
+    to: [identity.email],
     subject: "Subscription Activated",
     html,
   })
@@ -418,6 +442,7 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
     },
     { merge: true }
   )
+  await sendProActivationEmail(uid, finalPlanId)
  await orderDoc.ref.update({
   reconciled: true,
   reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1710,7 +1735,11 @@ app.post("/api/onboarding", onboardingLimiter, async (req, res) => {
     }
 // USER EMAIL 
 try {
-  const displayName = contactName || decoded.email
+  const identity = {
+  name: (contactName && contactName.trim()) || decoded.email,
+  email: decoded.email,
+  organization: (organizationName && organizationName.trim()) || null,
+}
 
   await resend.emails.send({
     from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
@@ -1725,13 +1754,13 @@ try {
           </div>
 
           <div style="padding: 30px;">
-            <p>${displayName},</p>
+            <p>${identity.name},</p>
 
             <h2 style="margin-top: 0;">Application Received</h2>
 
-            <p>
-              Your organization’s application has been received and is currently under review.
-            </p>
+           <p>
+  <strong>${identity.organization || "Your organization"}</strong> application has been received and is currently under review.
+</p>
 
             <p>
               This review process ensures that all issuing organizations meet the requirements for
@@ -1809,10 +1838,8 @@ app.post("/api/admin/approve-user", async (req, res) => {
       timestamp: new Date().toISOString(),
     })
 
-     // 📧 Send email
-const userRecord = await admin.auth().getUser(uid)
-const displayName = userRecord.displayName || userRecord.email
-
+     //  Send email
+const identity = await getUserIdentity(uid)
 try {
   const isApproved = action === "approved"
 
@@ -1830,7 +1857,7 @@ try {
       <!-- Body -->
       <div style="padding: 30px;">
         <p style="color: #374151; font-size: 14px;">
-          ${displayName},
+          ${identity.name},
         </p>
 
         <h2 style="color: #111827; margin: 10px 0;">
@@ -1844,7 +1871,7 @@ try {
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
           ${
             isApproved
-              ? "Your organization has been verified and approved. You may now issue certificates through the system."
+              ? `<strong>${identity.organization || "Your organization"}</strong> has been verified and approved. You may now issue certificates through the system.`
               : "Your organization’s application was not approved at this time following review."
           }
         </p>
@@ -1853,7 +1880,7 @@ try {
           isApproved
             ? `
         <p style="color: #4b5563; font-size: 15px; line-height: 1.6;">
-          Certificates issued through your account will be permanently recorded and independently verifiable.
+          Certificates issued under <strong>${identity.organization || "your account"}</strong> will be permanently recorded and independently verifiable.
         </p>
         `
             : `
@@ -1884,7 +1911,7 @@ try {
 
   await resend.emails.send({
     from: "GetCertifyHQ <onboarding@mail.getcertifyhq.com>",
-    to: [userRecord.email],
+    to: [identity.email],
     subject: isApproved
       ? "Organization Approved"
       : "Application Status Update",
@@ -2003,9 +2030,8 @@ await userRef.set(
 )
 
 try {
-  const userRecord = await admin.auth().getUser(uid)
-
-  await sendProActivationEmail(userRecord, planId)
+  
+await sendProActivationEmail(uid, planId)
 
 } catch (e) {
   console.error("Pro activation email failed:", e)
@@ -2330,9 +2356,7 @@ const proUntil = addInterval(base, interval)
 
    if (!orderSnap.get("emailSent")) { 
     try {
-  const userRecord = await admin.auth().getUser(uid)
-
-  await sendProActivationEmail(userRecord, finalPlanId)
+ await sendProActivationEmail(uid, finalPlanId)
  await orderRef.set(
       { emailSent: true },
       { merge: true }
