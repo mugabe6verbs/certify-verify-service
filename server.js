@@ -2232,6 +2232,7 @@ app.get('/pesapal/getStatus', authenticate, async (req, res) => {
     res.status(500).json({ ok:false, error: e?.response?.data || e?.message || String(e) })
   }
 })
+
 /* ============== Pesapal: IPN (GET/POST) ============== */
 async function handlePesaNotification(params, res) {
   try {
@@ -2251,21 +2252,62 @@ async function handlePesaNotification(params, res) {
       )}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
     )
+   
+    console.log(" IPN RECEIVED:", {
+  orderTrackingId,
+  merchant_reference: status?.merchant_reference,
+  status: status?.payment_status_description,
+  amount: status?.amount,
+  currency: status?.currency,
+  paid:
+    Number(status?.status_code) === 1 &&
+    String(status?.payment_status_description || "")
+      .toLowerCase()
+      .includes("completed"),
+})
 
     const paid = Number(status?.status_code) === 1 &&
     String(status?.payment_status_description || '') .toLowerCase() .includes('completed')
     const mr = String(status?.merchant_reference || "")
     let uid = null
     let planId = null
+let orderSnap = null
 
-    if (db && mr) {
-    const orderSnap = await db.collection("orders").doc(mr).get()
-    if (orderSnap.exists) {
-    const order = orderSnap.data()
-    uid = order.uid || null
-    planId = order.planId || null
-   }
-   }
+// 1. Try merchant reference
+if (db && mr) {
+  const snap = await db.collection("orders").doc(mr).get()
+  if (snap.exists) {
+    orderSnap = snap
+  }
+}
+
+// 2. Fallback to orderTrackingId
+if ((!orderSnap || !orderSnap.exists) && orderTrackingId) {
+  const querySnap = await db.collection("orders")
+    .where("orderTrackingId", "==", orderTrackingId)
+    .limit(1)
+    .get()
+
+  if (!querySnap.empty) {
+    orderSnap = querySnap.docs[0]
+  }
+}
+
+// 3. Extract data
+if (orderSnap && orderSnap.exists) {
+  const order = orderSnap.data()
+  uid = order.uid || null
+  planId = order.planId || null
+}
+
+if (paid && (!orderSnap || !orderSnap.exists)) {
+  console.error("❌ Paid but order not found", {
+    mr,
+    orderTrackingId
+  })
+
+  return res.status(404).json({ ok: false, error: "Order not found" })
+}
 
 
    if (paid && (!uid || uid.startsWith("monthly_"))) {
@@ -2276,123 +2318,122 @@ async function handlePesaNotification(params, res) {
 
     const amount = status?.amount
 const currency = String(status?.currency || CURRENCY).toUpperCase()
-
 /* ---------- PAYMENT AMOUNT VERIFICATION ---------- */
 const expectedAmount = AMOUNT_BY_PLAN[planId]
 
 if (paid && expectedAmount && Number(amount) !== Number(expectedAmount)) {
-  console.error("⚠ Payment amount mismatch", {
+  console.warn("⚠ Amount mismatch (non-blocking)", {
     amount,
     expectedAmount,
     planId,
-    merchantRef: mr
+    currency
   })
-
-  return res.status(400).json({ ok:false, error:"Payment amount mismatch" })
 }
+
 
 /* ---------- Continue if paid ---------- */
-if (paid && db && uid && mr) {
-      const orderRef = db.collection("orders").doc(mr)
-      const orderSnap = await orderRef.get()
+if (paid && db && uid && orderSnap) {
 
-      if (!orderSnap.exists) {
-        // Unknown order — persist record but do not upgrade user
-        await db
-          .collection("orders")
-          .doc(mr)
-          .set({ status: "failed_unknown_order", statusPayload: status }, { merge: true })
-          .catch(() => {})
-      } else {
-        const userRef = db.collection("users").doc(uid)
-        const userSnap = await userRef.get()
+  const alreadyPaid = orderSnap.get("status") === "paid"
 
-        //  If user profile doesn't exist yet, create a minimal one (race-proof)
-        if (!userSnap.exists) {
-          console.warn("⚠ Creating minimal user profile for paid order:", uid)
+if (alreadyPaid) {
+  console.log("⏭️ Skipping already processed payment:", orderTrackingId)
 
-          await userRef.set(
-            {
-              uid,
-              email: status?.billing_address?.email || null,
-              planId: "free",
-              pro: false,
-              systemCreated: true,
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          )
-        }
+  return res.json({ ok: true, status })
+}
+  const orderRef = orderSnap.ref
 
-        const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
-        const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-        const base = Math.max(
-  Date.now(),
-  Number(userSnap.get("proUntil") || 0)
-)
+  const userRef = db.collection("users").doc(uid)
+  const userSnap = await userRef.get()
 
-const proUntil = addInterval(base, interval)
+  // Create minimal user profile if missing (race-safe)
+  if (!userSnap.exists) {
+    console.warn("⚠ Creating minimal user profile for paid order:", uid)
 
-
-        //  Server is source of truth — always apply upgrade for paid orders
-        await userRef.set(
-          {
-            pro: true,
-            planId: finalPlanId,
-            proUntil,
-            proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastPayment: {
-              provider: "pesapal",
-              orderTrackingId,
-              merchant_reference: mr,
-              amount,
-              currency,
-              status: status?.payment_status_description,
-            },
-          },
-          { merge: true }
-        )
-
-   if (!orderSnap.get("emailSent")) { 
-    try {
- await sendProActivationEmail(uid, finalPlanId)
- await orderRef.set(
-      { emailSent: true },
+    await userRef.set(
+      {
+        uid,
+        email: status?.billing_address?.email || null,
+        planId: "free",
+        pro: false,
+        systemCreated: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
       { merge: true }
     )
-} catch (e) {
-  console.error("Pro activation email failed:", e)
-}
-   }
-        await orderRef.set(
-          {
-            status: "paid",
-            paidAt: admin.firestore.FieldValue.serverTimestamp(),
-            statusPayload: status,
-          },
-          { merge: true }
-        )
-      }
-    } else {
-      // Not paid / missing data — record failure
-      await db
-        ?.collection("orders")
-        .doc(mr || orderTrackingId)
-        .set({ status: "failed", statusPayload: status }, { merge: true })
-        .catch(() => {})
-    }
+  }
 
-    if (params?.OrderNotificationType === "IPNCHANGE") {
-      return res.json({
-        orderNotificationType: "IPNCHANGE",
+  const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
+  const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
+
+  const base = Math.max(
+    Date.now(),
+    Number(userSnap.get("proUntil") || 0)
+  )
+
+  const proUntil = addInterval(base, interval)
+
+  // Server is source of truth — always apply upgrade
+  await userRef.set(
+    {
+      pro: true,
+      planId: finalPlanId,
+      proUntil,
+      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastPayment: {
+        provider: "pesapal",
         orderTrackingId,
-        orderMerchantReference: status?.merchant_reference || "",
-        status: 200,
-      })
-    }
+        merchant_reference: mr,
+        amount,
+        currency,
+        status: status?.payment_status_description,
+      },
+    },
+    { merge: true }
+  )
 
-    return res.json({ ok: true, status })
+  // Send activation email once
+  if (!orderSnap.get("emailSent")) {
+    try {
+      await sendProActivationEmail(uid, finalPlanId)
+      await orderRef.set({ emailSent: true }, { merge: true })
+    } catch (e) {
+      console.error("Pro activation email failed:", e)
+    }
+  }
+
+  // Mark order as paid
+  await orderRef.set(
+    {
+      status: "paid",
+      paidAt: admin.firestore.FieldValue.serverTimestamp(),
+      statusPayload: status,
+    },
+    { merge: true }
+  )
+
+} else {
+  // Not paid / missing data — record failure
+  await db
+    ?.collection("orders")
+    .doc(mr || orderTrackingId)
+    .set({ status: "failed", statusPayload: status }, { merge: true })
+    .catch(() => {})
+}
+
+
+/* ---------- IPN RESPONSE ---------- */
+if (params?.OrderNotificationType === "IPNCHANGE") {
+  return res.json({
+    orderNotificationType: "IPNCHANGE",
+    orderTrackingId,
+    orderMerchantReference: status?.merchant_reference || "",
+    status: 200,
+  })
+}
+
+return res.json({ ok: true, status })
   } catch (e) {
     const err = e?.response?.data || e?.message || String(e)
     return res.status(500).json({ ok: false, error: err })
