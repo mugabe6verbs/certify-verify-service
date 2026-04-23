@@ -1634,9 +1634,7 @@ if (
 
   logoDataUrl: cert.logoDataUrl || null,
   
- 
-
-  {(cert.courseTitle || cert.achievementText) && (
+  titleText: cert.titleText || "Certificate",
   titleTransform: cert.titleTransform || "none",
 
   template: cert.template,
