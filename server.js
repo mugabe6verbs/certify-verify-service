@@ -1643,7 +1643,7 @@ if (
   
  
 
-  titleText: cert.titleText || "Certificate",
+  titleText: (cert.courseTitle?.trim() || cert.achievementText?.trim()) || "Certificate",
   titleTransform: cert.titleTransform || "none",
 
   template: cert.template,
