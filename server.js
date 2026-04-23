@@ -883,18 +883,11 @@ if (PRO_TEMPLATES.includes(template)) {
     throw new Error('PRO_TEMPLATE_NOT_ALLOWED')
   }
  }
-const courseTitleRaw = String(data.courseTitle || '').trim()
-const achievementRaw = String(data.achievementText || '').trim()
 
-const finalTitle = courseTitleRaw || achievementRaw
-
-if (!finalTitle) {
-  throw new Error('MISSING_TITLE')
-}
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
-  courseTitle: finalTitle,
-  achievementText: achievementRaw || null,
+  courseTitle: String(data.courseTitle || '').trim(),
+  achievementText: data.achievementText || null,
   externalId: data.externalId || null,
   expiryDate: data.expiryDate || null,
   customNote: data.customNote || null,
