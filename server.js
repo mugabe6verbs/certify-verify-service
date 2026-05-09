@@ -886,8 +886,67 @@ if (PRO_TEMPLATES.includes(template)) {
 
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
-  courseTitle: String(data.courseTitle || '').trim(),
-  achievementText: data.achievementText || null,
+  recognition: {
+  type:
+    data.recognition?.type ||
+
+    (
+      data.achievementText
+        ? "achievement"
+        : "completion"
+    ),
+
+  value: String(
+  data.recognition?.value ||
+  data.achievementText ||
+  data.courseTitle ||
+  ""
+).trim(),
+},
+  // Legacy compatibility fields
+courseTitle:
+  (
+    data.recognition?.type === "completion"
+  )
+    ? String(
+        data.recognition?.value ||
+        data.courseTitle ||
+        ''
+      ).trim()
+    : null,
+
+achievementText:
+  (
+    data.recognition?.type !== "completion"
+  )
+    ? (
+        data.recognition?.value ||
+        data.achievementText ||
+        null
+      )
+    : null,
+    signatories: Array.isArray(data.signatories)
+  ? data.signatories
+  : [
+      {
+        role: "Primary Signatory",
+        name: String(data.issuerName || "").trim(),
+        title: data.issuerPosition || "",
+        signatureDataUrl: data.sigDataUrl || null,
+      },
+
+      ...(data.issuerName2
+        ? [
+            {
+              role: "Secondary Signatory",
+              name: data.issuerName2 || "",
+              title: data.issuerPosition2 || "",
+              signatureDataUrl:
+                data.sigDataUrl2 || null,
+            },
+          ]
+        : []),
+    ],
   externalId: data.externalId || null,
   expiryDate: data.expiryDate || null,
   customNote: data.customNote || null,
@@ -932,6 +991,8 @@ if (PRO_TEMPLATES.includes(template)) {
 tx.set(orgCertRef, {
   serial,
   recipientName: payload.recipientName,
+  recognition: payload.recognition || null,
+  signatories: payload.signatories || [],
   courseTitle: payload.courseTitle,
   achievementText: payload.achievementText || null,
   orgName: payload.orgName,
@@ -955,14 +1016,15 @@ tx.set(lookupRef, {
 
   orgName: payload.orgName,
   recipientName: payload.recipientName,
-
+  recognition: payload.recognition || null,
+  signatories: payload.signatories || [],
   courseTitle: payload.courseTitle,
   achievementText: payload.achievementText || null,
   
   issueDate: payload.issueDate || null,
   expiryDate: payload.expiryDate || null,
 
-  template: payload.template || "classic",
+  template: payload.template || "minimal",
   brand: payload.brand || null,
 
   status: payload.status || "valid",
@@ -1566,9 +1628,30 @@ if (
   orgId: cert.orgId || null,
 
   recipientName: cert.recipientName || null,
-  courseTitle: cert.courseTitle || null,
-  achievementText: cert.achievementText || null,
-  orgName: cert.orgName || null,
+
+  // Canonical recognition model
+  recognition:
+    cert.recognition || {
+      type:
+        cert.achievementText
+          ? "achievement"
+          : "completion",
+
+      value:
+        cert.achievementText ||
+        cert.courseTitle ||
+        "",
+    },
+
+  // Legacy compatibility fields
+  courseTitle:
+    cert.courseTitle || null,
+
+  achievementText:
+    cert.achievementText || null,
+
+  orgName:
+    cert.orgName || null,
 
   viewedAt: admin.firestore.FieldValue.serverTimestamp(),
 
@@ -1617,6 +1700,8 @@ if (
    const publicPayload = {
   serial: cert.serial,
   recipientName: cert.recipientName,
+  recognition: cert.recognition || null,
+  signatories: cert.signatories || [],
   courseTitle: cert.courseTitle,
   achievementText: cert.achievementText || null,
   customNote: cert.customNote || null,
