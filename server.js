@@ -925,14 +925,22 @@ achievementText:
         null
       )
     : null,
-    signatories: Array.isArray(data.signatories)
+   signatories: Array.isArray(data.signatories)
   ? data.signatories
   : [
       {
         role: "Primary Signatory",
         name: String(data.issuerName || "").trim(),
         title: data.issuerPosition || "",
-        signatureDataUrl: data.sigDataUrl || null,
+
+        signatureDataUrl:
+          data.signatures?.find(
+            s => s.id === "sig-1"
+          )?.dataUrl ||
+
+          data.sigDataUrl ||
+
+          null,
       },
 
       ...(data.issuerName2
@@ -941,8 +949,15 @@ achievementText:
               role: "Secondary Signatory",
               name: data.issuerName2 || "",
               title: data.issuerPosition2 || "",
+
               signatureDataUrl:
-                data.sigDataUrl2 || null,
+                data.signatures?.find(
+                  s => s.id === "sig-2"
+                )?.dataUrl ||
+
+                data.sigDataUrl2 ||
+
+                null,
             },
           ]
         : []),
