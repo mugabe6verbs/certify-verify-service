@@ -1547,29 +1547,43 @@ if (cached) {
   if (looksSuspiciousSerial(rawSerial)) {
   return res.status(400).json({ ok: false })
 }
-    let cert = null
- const certSnap = await db.collection('certificates').doc(rawSerial).get()
+   let cert = null
 
-if (certSnap.exists) {
-  cert = certSnap.data()
-}
-  if (!cert) {
-  // Fallback lookup using global serial registry (faster than collectionGroup)
-  const lookupSnap = await db
-    .collection('certificateLookup')
-    .doc(rawSerial)
-    .get()
+// Resolve serial → orgId
+const lookupSnap = await db
+  .collection('certificateLookup')
+  .doc(rawSerial)
+  .get()
 
-  if (lookupSnap.exists) {
-    cert = lookupSnap.data()
-
-    // Ensure serial is present (safety for legacy entries)
-    if (!cert.serial) {
-      cert.serial = rawSerial
-    }
-  }
+if (!lookupSnap.exists) {
+  return res.status(404).json({ ok: false })
 }
 
+const lookup = lookupSnap.data()
+
+// Safety
+if (!lookup.orgId) {
+  return res.status(404).json({ ok: false })
+}
+
+// Load authoritative org certificate
+const orgCertSnap = await db
+  .collection('orgs')
+  .doc(lookup.orgId)
+  .collection('certificates')
+  .doc(rawSerial)
+  .get()
+
+if (!orgCertSnap.exists) {
+  return res.status(404).json({ ok: false })
+}
+
+cert = orgCertSnap.data()
+
+// Ensure serial exists
+if (!cert.serial) {
+  cert.serial = rawSerial
+}
 if (!cert) {
   return res.status(404).json({ ok: false })
 }
