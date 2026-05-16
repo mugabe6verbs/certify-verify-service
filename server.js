@@ -905,8 +905,17 @@ if (PRO_TEMPLATES.includes(template)) {
 },
   // Legacy compatibility fields
 courseTitle:
-  (
-    data.recognition?.type === "completion"
+  [
+    "completion",
+    "participation",
+    "attendance",
+    "training",
+    "membership",
+    "certificate",
+    "diploma",
+    "degree",
+  ].includes(
+    data.recognition?.type
   )
     ? String(
         data.recognition?.value ||
@@ -916,8 +925,17 @@ courseTitle:
     : null,
 
 achievementText:
-  (
-    data.recognition?.type !== "completion"
+  ![
+    "completion",
+    "participation",
+    "attendance",
+    "training",
+    "membership",
+    "certificate",
+    "diploma",
+    "degree",
+  ].includes(
+    data.recognition?.type
   )
     ? (
         data.recognition?.value ||
@@ -1003,54 +1021,13 @@ achievementText:
       // Main certificate (legacy global collection)
  tx.set(certRef, payload, { merge: true })
  // Org-scoped certificate (fast org queries - lightweight)
-tx.set(orgCertRef, {
-  serial,
-  recipientName: payload.recipientName,
-  recognition: payload.recognition || null,
-  signatories: payload.signatories || [],
-  signatures: payload.signatures || [],
-  courseTitle: payload.courseTitle,
-  achievementText: payload.achievementText || null,
-  orgName: payload.orgName,
-  status: payload.status,
-  template: payload.template,
-  issueDate: payload.issueDate,
-  expiryDate: payload.expiryDate || null,
-  externalId: payload.externalId || null,
-  titleText: payload.titleText || null,
-  createdAt: payload.createdAt,
-  ownerUid: payload.ownerUid,
-  orgId: payload.orgId,
-  verificationDomain: payload.verificationDomain
-}, { merge: true })
+ tx.set(orgCertRef, payload, {
+  merge: true
+})
 
-  // Global serial registry (verification snapshot)
-tx.set(lookupRef, {
-  serial,
-  orgId,
-  ownerUid: uid,
-
-  orgName: payload.orgName,
-  recipientName: payload.recipientName,
-  recognition: payload.recognition || null,
-  signatories: payload.signatories || [],
-  signatures: payload.signatures || [],
-  courseTitle: payload.courseTitle,
-  achievementText: payload.achievementText || null,
-  
-  issueDate: payload.issueDate || null,
-  expiryDate: payload.expiryDate || null,
-
-  template: payload.template || "minimal",
-  brand: payload.brand || null,
-
-  status: payload.status || "valid",
-  visibility: payload.visibility || "public",
-
-  verificationDomain: domainUsed,
-
-  createdAt: now
-}, { merge: true })
+ tx.set(lookupRef, payload, {
+  merge: true
+})
  // Issuance history
  tx.set(historyRef, {
   action: 'issued',
