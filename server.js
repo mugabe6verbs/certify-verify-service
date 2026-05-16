@@ -982,7 +982,7 @@ achievementText:
 
   template,
   accentColor: data.accentColor || '#CFAE49',
-  titleText: data.titleText || 'Certificate',
+  titleText: String(data.titleText || '').trim() || null,
 
   brand: data.brand || {},
   i18n: data.i18n || {},
@@ -1008,6 +1008,7 @@ tx.set(orgCertRef, {
   recipientName: payload.recipientName,
   recognition: payload.recognition || null,
   signatories: payload.signatories || [],
+  signatures: payload.signatures || [],
   courseTitle: payload.courseTitle,
   achievementText: payload.achievementText || null,
   orgName: payload.orgName,
@@ -1033,6 +1034,7 @@ tx.set(lookupRef, {
   recipientName: payload.recipientName,
   recognition: payload.recognition || null,
   signatories: payload.signatories || [],
+  signatures: payload.signatures || [],
   courseTitle: payload.courseTitle,
   achievementText: payload.achievementText || null,
   
