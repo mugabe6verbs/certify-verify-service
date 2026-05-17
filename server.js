@@ -905,17 +905,8 @@ if (PRO_TEMPLATES.includes(template)) {
 },
   // Legacy compatibility fields
 courseTitle:
-  [
-    "completion",
-    "participation",
-    "attendance",
-    "training",
-    "membership",
-    "certificate",
-    "diploma",
-    "degree",
-  ].includes(
-    data.recognition?.type
+  (
+    data.recognition?.type === "completion"
   )
     ? String(
         data.recognition?.value ||
@@ -925,17 +916,8 @@ courseTitle:
     : null,
 
 achievementText:
-  ![
-    "completion",
-    "participation",
-    "attendance",
-    "training",
-    "membership",
-    "certificate",
-    "diploma",
-    "degree",
-  ].includes(
-    data.recognition?.type
+  (
+    data.recognition?.type !== "completion"
   )
     ? (
         data.recognition?.value ||
@@ -943,7 +925,9 @@ achievementText:
         null
       )
     : null,
-  signatories: [],
+   signatories: Array.isArray(data.signatories)
+  ? data.signatories
+  : [
       {
         role: "Primary Signatory",
         name: String(data.issuerName || "").trim(),
@@ -998,7 +982,10 @@ achievementText:
 
   template,
   accentColor: data.accentColor || '#CFAE49',
-  titleText: String(data.titleText || '').trim() || null,
+  titleText:
+  typeof data.titleText === "string"
+    ? data.titleText.trim()
+    : "",
 
   brand: data.brand || {},
   i18n: data.i18n || {},
@@ -1019,13 +1006,53 @@ achievementText:
       // Main certificate (legacy global collection)
  tx.set(certRef, payload, { merge: true })
  // Org-scoped certificate (fast org queries - lightweight)
- tx.set(orgCertRef, payload, {
-  merge: true
-})
+tx.set(orgCertRef, {
+  serial,
+  recipientName: payload.recipientName,
+  recognition: payload.recognition || null,
+  signatories: payload.signatories || [],
+  courseTitle: payload.courseTitle,
+  achievementText: payload.achievementText || null,
+  orgName: payload.orgName,
+  status: payload.status,
+  template: payload.template,
+  issueDate: payload.issueDate,
+  expiryDate: payload.expiryDate || null,
+  externalId: payload.externalId || null,
+  titleText: payload.titleText || null,
+  createdAt: payload.createdAt,
+  ownerUid: payload.ownerUid,
+  orgId: payload.orgId,
+  verificationDomain: payload.verificationDomain
+}, { merge: true })
 
- tx.set(lookupRef, payload, {
-  merge: true
-})
+  // Global serial registry (verification snapshot)
+tx.set(lookupRef, {
+  serial,
+  orgId,
+  ownerUid: uid,
+
+  orgName: payload.orgName,
+  recipientName: payload.recipientName,
+  recognition: payload.recognition || null,
+  signatories: payload.signatories || [],
+   signatures: payload.signatures || [],
+  courseTitle: payload.courseTitle,
+  achievementText: payload.achievementText || null,
+  
+  issueDate: payload.issueDate || null,
+  expiryDate: payload.expiryDate || null,
+
+  template: payload.template || "minimal",
+  brand: payload.brand || null,
+
+  status: payload.status || "valid",
+  visibility: payload.visibility || "public",
+
+  verificationDomain: domainUsed,
+
+  createdAt: now
+}, { merge: true })
  // Issuance history
  tx.set(historyRef, {
   action: 'issued',
@@ -1545,43 +1572,29 @@ if (cached) {
   if (looksSuspiciousSerial(rawSerial)) {
   return res.status(400).json({ ok: false })
 }
-   let cert = null
+    let cert = null
+ const certSnap = await db.collection('certificates').doc(rawSerial).get()
 
-// Resolve serial → orgId
-const lookupSnap = await db
-  .collection('certificateLookup')
-  .doc(rawSerial)
-  .get()
+if (certSnap.exists) {
+  cert = certSnap.data()
+}
+  if (!cert) {
+  // Fallback lookup using global serial registry (faster than collectionGroup)
+  const lookupSnap = await db
+    .collection('certificateLookup')
+    .doc(rawSerial)
+    .get()
 
-if (!lookupSnap.exists) {
-  return res.status(404).json({ ok: false })
+  if (lookupSnap.exists) {
+    cert = lookupSnap.data()
+
+    // Ensure serial is present (safety for legacy entries)
+    if (!cert.serial) {
+      cert.serial = rawSerial
+    }
+  }
 }
 
-const lookup = lookupSnap.data()
-
-// Safety
-if (!lookup.orgId) {
-  return res.status(404).json({ ok: false })
-}
-
-// Load authoritative org certificate
-const orgCertSnap = await db
-  .collection('orgs')
-  .doc(lookup.orgId)
-  .collection('certificates')
-  .doc(rawSerial)
-  .get()
-
-if (!orgCertSnap.exists) {
-  return res.status(404).json({ ok: false })
-}
-
-cert = orgCertSnap.data()
-
-// Ensure serial exists
-if (!cert.serial) {
-  cert.serial = rawSerial
-}
 if (!cert) {
   return res.status(404).json({ ok: false })
 }
@@ -1725,7 +1738,10 @@ if (
 
   logoDataUrl: cert.logoDataUrl || null,
   
-  titleText: cert.titleText || "Certificate",
+  titleText:
+  typeof cert.titleText === "string"
+    ? cert.titleText.trim()
+    : "",
   titleTransform: cert.titleTransform || "none",
 
   template: cert.template,
