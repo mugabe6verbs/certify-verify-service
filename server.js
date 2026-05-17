@@ -943,9 +943,7 @@ achievementText:
         null
       )
     : null,
-   signatories: Array.isArray(data.signatories)
-  ? data.signatories
-  : [
+  signatories: [],
       {
         role: "Primary Signatory",
         name: String(data.issuerName || "").trim(),
