@@ -986,7 +986,10 @@ achievementText:
   typeof data.titleText === "string"
     ? data.titleText.trim()
     : "",
-
+ titleTransform:
+  typeof data.titleTransform === "string"
+    ? data.titleTransform
+    : "uppercase",
   brand: data.brand || {},
   i18n: data.i18n || {},
 
@@ -1044,6 +1047,11 @@ tx.set(lookupRef, {
   expiryDate: payload.expiryDate || null,
 
   template: payload.template || "minimal",
+  titleText:
+  payload.titleText || "",
+
+titleTransform:
+  payload.titleTransform || "uppercase",
   brand: payload.brand || null,
 
   status: payload.status || "valid",
