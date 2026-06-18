@@ -884,6 +884,10 @@ if (PRO_TEMPLATES.includes(template)) {
   }
  }
 
+      console.log("[ISSUE PHOTO]", {
+  hasPhoto: !!data.photoDataUrl,
+  photoLength: data.photoDataUrl?.length || 0,
+})
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
   recognition: {
@@ -1040,6 +1044,13 @@ tx.set(lookupRef, {
   recognition: payload.recognition || null,
   signatories: payload.signatories || [],
    signatures: payload.signatures || [],
+  
+   logoDataUrl: payload.logoDataUrl || null,
+  photoDataUrl: payload.photoDataUrl || null,
+  sealDataUrl: payload.sealDataUrl || null,
+
+   i18n: payload.i18n || {},
+
   courseTitle: payload.courseTitle,
   achievementText: payload.achievementText || null,
   
