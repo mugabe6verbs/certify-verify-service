@@ -1763,7 +1763,10 @@ if (
   expiryDate: cert.expiryDate || null,
 
   logoDataUrl: cert.logoDataUrl || null,
-  
+     
+  photoDataUrl: cert.photoDataUrl || null,
+  sealDataUrl: cert.sealDataUrl || null,
+     
   titleText:
   typeof cert.titleText === "string"
     ? cert.titleText.trim()
