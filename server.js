@@ -725,6 +725,7 @@ app.options("*", cors(corsOptions))
   }
  })
 
+
  /* ============== CERTIFICATES ISSUE  ============== */
 
 
@@ -884,10 +885,11 @@ if (PRO_TEMPLATES.includes(template)) {
   }
  }
 
-      console.log("[ISSUE PHOTO]", {
+ console.log("[SERVER PHOTO]", {
   hasPhoto: !!data.photoDataUrl,
-  photoLength: data.photoDataUrl?.length || 0,
+  length: data.photoDataUrl?.length || 0,
 })
+
       const payload = {
   recipientName: String(data.recipientName || '').trim(),
   recognition: {
@@ -1044,7 +1046,7 @@ tx.set(lookupRef, {
   recognition: payload.recognition || null,
   signatories: payload.signatories || [],
    signatures: payload.signatures || [],
-  
+
    logoDataUrl: payload.logoDataUrl || null,
   photoDataUrl: payload.photoDataUrl || null,
   sealDataUrl: payload.sealDataUrl || null,
