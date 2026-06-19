@@ -740,6 +740,11 @@ app.options("*", cors(corsOptions))
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
  const data = req.body || {}
+    console.log("[SERVER PHOTO]", {
+  hasPhoto: !!data.photoDataUrl,
+  length: data.photoDataUrl?.length || 0,
+  start: data.photoDataUrl?.slice(0, 50),
+})
  const idempotencyKey = req.headers['x-idempotency-key']
 let scopedKey = null
 
