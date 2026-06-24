@@ -34,7 +34,10 @@ const allowList = ALLOW_ORIGINS.split(",")
   .map(o => o.trim())
   .filter(Boolean)
 
-const FREE_TEMPLATES = ['minimal', 'classic-border']
+const FREE_TEMPLATES = [
+  'minimal', 
+  'classic'
+]
 
 const PRO_TEMPLATES = [
   'modern',
