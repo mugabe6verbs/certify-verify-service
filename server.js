@@ -40,7 +40,7 @@ const PRO_TEMPLATES = [
   'modern',
   'luxury',
   'photo',
-  'academic-seal',
+  'academic',
   'creative'
 ]
 
