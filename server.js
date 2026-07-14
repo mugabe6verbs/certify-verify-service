@@ -1156,6 +1156,94 @@ if (e.message === 'MISSING_REQUIRED_FIELDS') {
     return res.status(500).json({ ok: false, error: e.message || 'Server error' })
   }
 })
+// ======================================================
+// Reserve serials using Firestore WriteBatch
+// Splits writes automatically to stay below Firestore's
+// 500-operation limit.
+// ======================================================
+
+async function reserveSerials({
+  db,
+  uid,
+  orgId,
+  batchId,
+  serials,
+}) {
+  if (!serials?.length) return
+
+  const MAX_BATCH_WRITES = 450
+
+  const now = admin.firestore.FieldValue.serverTimestamp()
+
+  const expiresAt = admin.firestore.Timestamp.fromMillis(
+    Date.now() + 30 * 60 * 1000 // 30 minutes
+  )
+
+  let batch = db.batch()
+  let operations = 0
+
+  async function commitBatch() {
+    if (operations === 0) return
+
+    await batch.commit()
+
+    batch = db.batch()
+    operations = 0
+  }
+
+  for (const serial of serials) {
+    const certRef = db.collection("certificates").doc(serial)
+
+    const orgCertRef = db
+      .collection("orgs")
+      .doc(orgId)
+      .collection("certificates")
+      .doc(serial)
+
+    const lookupRef = db
+      .collection("certificateLookup")
+      .doc(serial)
+
+    const reservation = {
+      reserved: true,
+      reservedBy: uid,
+      batchId,
+      reservedAt: now,
+      reservationExpiresAt: expiresAt,
+    }
+
+    // Legacy certificate
+    batch.set(certRef, reservation)
+
+    // Organization certificate
+    batch.set(orgCertRef, {
+      ...reservation,
+      ownerUid: uid,
+      orgId,
+    })
+
+    // Lookup record
+    batch.set(lookupRef, {
+      serial,
+      ownerUid: uid,
+      orgId,
+      reserved: true,
+      batchId,
+      createdAt: now,
+    })
+
+    operations += 3
+
+    // Stay comfortably below Firestore's
+    // 500 write limit per batch.
+    if (operations >= MAX_BATCH_WRITES) {
+      await commitBatch()
+    }
+  }
+
+  // Commit any remaining writes
+  await commitBatch()
+}
 
 /* ============== BULK CERTIFICATE PREPARE  ============== */
 
@@ -1185,6 +1273,15 @@ app.post(
 
       const userRef = db.collection('users').doc(uid)
       const batchRef = db.collection('bulkBatches').doc()
+
+ // Generate candidate serials BEFORE opening the transaction
+const serialSet = new Set()
+
+while (serialSet.size < count) {
+  serialSet.add(generateSerial())
+}
+
+const serials = [...serialSet]
 
       const result = await db.runTransaction(async (tx) => {
         /* ---------- READ PHASE ---------- */
@@ -1217,32 +1314,6 @@ if (userData.status !== "approved") {
    }
  
   const orgId = userData.orgId || uid
-        // Generate all serials (READ ONLY)
-        const serials = []
-const serialSet = new Set()
-
-let attempts = 0
-const MAX_ATTEMPTS = count * 10
-
-while (serials.length < count && attempts < MAX_ATTEMPTS) {
-  attempts++
-
-  const s = generateSerial()
-
-  const lookupRef = db.collection('certificateLookup').doc(s)
-  const snap = await tx.get(lookupRef)
-
-  if (!snap.exists && !serialSet.has(s)) {
-    serials.push(s)
-    serialSet.add(s)
-  }
-}
-
-if (serials.length < count) {
-  throw new Error('SERIAL_GENERATION_FAILED')
-}
-
-
         /* ---------- WRITE PHASE ---------- */
         const quotaResult = await checkAndConsumeQuotaTx(tx, uid, count)
         if (!quotaResult.ok) {
@@ -1255,57 +1326,24 @@ if (serials.length < count) {
 
         const now = admin.firestore.FieldValue.serverTimestamp()
         tx.set(batchRef, { ownerUid: uid, orgId, count, createdAt: now, meta})
-        // Lock serials
-        for (const s of serials) {
 
-  const certRef = db.collection('certificates').doc(s)
-
-  const orgCertRef = db
-    .collection('orgs')
-    .doc(orgId)
-    .collection('certificates')
-    .doc(s)
-
-  const lookupRef = db.collection('certificateLookup').doc(s)
-
-  // reserve certificate
-  tx.set(certRef, {
-  reserved: true,
-  reservedBy: uid,
-  batchId: batchRef.id,
-  reservedAt: now,
-  reservationExpiresAt: admin.firestore.Timestamp.fromMillis(
-    Date.now() + 30 * 60 * 1000
-  )
-})
-
-  // reserve org certificate
-   tx.set(orgCertRef, {
-  reserved: true,
-  reservedBy: uid,
-  batchId: batchRef.id,
-  reservedAt: now,
-  reservationExpiresAt: admin.firestore.Timestamp.fromMillis(
-    Date.now() + 30 * 60 * 1000
-  ),
-  ownerUid: uid,
-  orgId
-})
-
-  // reserve lookup
-  tx.set(lookupRef, {
-    serial: s,
-    orgId,
-    ownerUid: uid,
-    reserved: true,
-    batchId: batchRef.id,
-    createdAt: now
-  })
-}
-        return { serials, batchId: batchRef.id }
+      
+       return { serials, batchId: batchRef.id, orgId, }
       })
+      
+     await reserveSerials({
+  db,
+  uid,
+  orgId: result.orgId,
+  batchId: result.batchId,
+  serials: result.serials,
+})
 
-      return res.json({ ok: true, ...result })
+      return res.json({
+  ok: true,
+  serials: result.serials,
+  batchId: result.batchId,
+})
 
     } catch (e) {
       console.error('BULK PREPARE ERROR', e)
@@ -1324,149 +1362,6 @@ if (serials.length < count) {
       }
 
       return res.status(500).json({ ok: false, error: 'Server error' })
-    }
-  }
-)
-
-/* ============== BULK START ============== */
-
-app.post(
-  "/api/certificates/bulk/start",
-  authenticate,
-  bulkLimiter,
-  async (req, res) => {
-    try {
-      if (!db) {
-        return res.status(500).json({
-          ok: false,
-          error: "Server missing Firebase credentials",
-        })
-      }
-
-      const uid = req.user?.uid
-
-      if (!uid) {
-        return res.status(401).json({
-          ok: false,
-          error: "Unauthorized",
-        })
-      }
-
-      const { count, meta = {} } = req.body || {}
-
-      if (!Number.isInteger(count) || count <= 0 || count > 500) {
-        return res.status(400).json({
-          ok: false,
-          error: "Invalid count (1–500 allowed per batch)",
-        })
-      }
-
-      const userRef = db.collection("users").doc(uid)
-      const batchRef = db.collection("bulkBatches").doc()
-
-      const result = await db.runTransaction(async (tx) => {
-
-        const userSnap = await tx.get(userRef)
-
-        if (!userSnap.exists) {
-          throw new Error("PRO_REQUIRED")
-        }
-
-        const userData = userSnap.data() || {}
-
-        if (userData.status !== "approved") {
-          throw new Error("ACCOUNT_NOT_APPROVED")
-        }
-
-        const rawProUntil = userData.proUntil
-
-        let proUntil = null
-
-        if (typeof rawProUntil === "number") {
-          proUntil = rawProUntil
-        } else if (rawProUntil?.toMillis) {
-          proUntil = rawProUntil.toMillis()
-        }
-
-        if (!proUntil || Date.now() >= proUntil) {
-          throw new Error("PRO_REQUIRED")
-        }
-
-        const orgId = userData.orgId || uid
-
-        // Keep quota reservation exactly as today
-        const quotaResult = await checkAndConsumeQuotaTx(tx, uid, count)
-
-        if (!quotaResult.ok) {
-          throw new Error(
-            quotaResult.reason === "daily"
-              ? `Daily bulk limit reached (${quotaResult.limit}/day)`
-              : `Monthly bulk limit reached (${quotaResult.limit}/month)`
-          )
-        }
-
-        const now = admin.firestore.FieldValue.serverTimestamp()
-
-        tx.set(batchRef, {
-          ownerUid: uid,
-          orgId,
-
-          count,
-          meta,
-
-          status: "pending",
-
-          issued: 0,
-          failed: 0,
-
-          progress: 0,
-
-          createdAt: now,
-          startedAt: null,
-          completedAt: null,
-        })
-
-        return {
-          batchId: batchRef.id,
-          orgId,
-          count,
-        }
-      })
-
-      return res.json({
-        ok: true,
-        ...result,
-      })
-
-    } catch (e) {
-
-      console.error("BULK START ERROR", e)
-
-      if (e.message === "PRO_REQUIRED") {
-        return res.status(403).json({
-          ok: false,
-          error: "Pro plan required",
-        })
-      }
-
-      if (e.message === "ACCOUNT_NOT_APPROVED") {
-        return res.status(403).json({
-          ok: false,
-          error: "Account not approved",
-        })
-      }
-
-      if (e.message?.toLowerCase().includes("limit")) {
-        return res.status(429).json({
-          ok: false,
-          error: e.message,
-        })
-      }
-
-      return res.status(500).json({
-        ok: false,
-        error: "Server error",
-      })
     }
   }
 )
