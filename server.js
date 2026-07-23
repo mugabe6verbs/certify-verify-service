@@ -1155,17 +1155,21 @@ titleTransform:
  console.log("ISSUED CERT:", { uid, serial: result.serial })
 // ================= ANALYTICS UPDATE =================
 try {
-  const userSnap = await db.collection('users').doc(uid).get()
-  const orgId = userSnap.data()?.orgId || uid
+  const userSnap = await db
+    .collection("users")
+    .doc(uid)
+    .get()
 
-  const analyticsRef = db.collection("orgAnalytics").doc(orgId)
+  const orgId =
+    userSnap.data()?.orgId || uid
 
-  await analyticsRef.set({
-    totalIssued: admin.firestore.FieldValue.increment(1)
-  }, { merge: true })
+  await recordCertificateIssued(orgId)
 
 } catch (err) {
-  console.warn("⚠ analytics update failed (issue):", err?.message || err)
+  console.warn(
+    "⚠ analytics update failed (issue):",
+    err?.message || err
+  )
 }
    const response = {
   ok: true,
