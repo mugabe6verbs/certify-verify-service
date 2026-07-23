@@ -784,16 +784,30 @@ app.options("*", cors(corsOptions))
  })
 
 
+
+
  /* ============== CERTIFICATES ISSUE  ============== */
 
 
  app.post('/api/certificates/issue', authenticate, async (req, res) => {
   try {
+
+const issueStarted = Date.now()
+
+function mark(step) {
+  console.log(
+    `[ISSUE TIMING] ${step}: ${Date.now() - issueStarted}ms`
+  )
+}
     if (!db) {
       return res.status(500).json({ ok: false, error: 'Server missing Firebase credentials' })
     }
 
+mark("firebase ready")
+
     const uid = req.user?.uid
+
+mark("authenticated")
     if (!uid) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' })
     }
@@ -837,8 +851,14 @@ if (idempotencyKey) {
     const userRef = db.collection('users').doc(uid)
 
     const result = await db.runTransaction(async (tx) => {
+
+mark("transaction committed")
+
+mark("starting transaction")
       /* ---------- READ PHASE ---------- */
       const userSnap = await tx.get(userRef)
+
+mark("loaded user")
       const userData = userSnap.data() || {}
       
       if (!userSnap.exists) {
@@ -854,6 +874,8 @@ if (userData.status !== "approved") {
 
       const orgRef = db.collection('orgs').doc(orgId)
       const orgSnap = await tx.get(orgRef)
+
+mark("loaded organization")
 
    if (!orgSnap.exists) {
   throw new Error('ORG_NOT_FOUND')
@@ -901,6 +923,8 @@ for (let i = 0; i < 5; i++) {
 if (!serial) {
   throw new Error('SERIAL_GENERATION_FAILED')
 }
+
+mark("serial generated")
    // Determine verification domain at issuance time (LOCKED)
 let domainUsed = normalizeDomain(new URL(PUBLIC_SITE_URL).hostname)
 
@@ -916,6 +940,8 @@ if (
 
       /* ---------- WRITE PHASE ---------- */
       const quotaResult = await checkAndConsumeQuotaTx(tx, uid, 1)
+
+mark("quota checked")
       if (!quotaResult.ok) {
         throw new Error(
           quotaResult.reason === "daily"
@@ -1145,6 +1171,8 @@ titleTransform:
   source: 'api',
   ip: req.ip
  })
+
+mark("transaction finished")
     
    return { serial, verifyUrl }
     })
@@ -1155,21 +1183,19 @@ titleTransform:
  console.log("ISSUED CERT:", { uid, serial: result.serial })
 // ================= ANALYTICS UPDATE =================
 try {
-  const userSnap = await db
-    .collection("users")
-    .doc(uid)
-    .get()
+  const userSnap = await db.collection('users').doc(uid).get()
+  const orgId = userSnap.data()?.orgId || uid
 
-  const orgId =
-    userSnap.data()?.orgId || uid
+  const analyticsRef = db.collection("orgAnalytics").doc(orgId)
 
-  await recordCertificateIssued(orgId)
+  await analyticsRef.set({
+    totalIssued: admin.firestore.FieldValue.increment(1)
+  }, { merge: true })
+
+mark("analytics updated")
 
 } catch (err) {
-  console.warn(
-    "⚠ analytics update failed (issue):",
-    err?.message || err
-  )
+  console.warn("⚠ analytics update failed (issue):", err?.message || err)
 }
    const response = {
   ok: true,
@@ -1183,6 +1209,10 @@ if (idempotencyKey && scopedKey) {
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   })
 }
+
+mark("idempotency stored")
+
+mark("response sent")
 
 return res.json(response)
 
