@@ -786,6 +786,7 @@ app.options("*", cors(corsOptions))
 
 
 
+
  /* ============== CERTIFICATES ISSUE  ============== */
 
 
@@ -824,7 +825,12 @@ if (idempotencyKey) {
   scopedKey = `${uid}_${idempotencyKey}`
 
   const keyRef = db.collection('idempotency').doc(scopedKey)
+
+mark("before idempotency read")
+
   const keySnap = await keyRef.get()
+
+mark("after idempotency read")
 
   if (keySnap.exists) {
     return res.json(keySnap.data())
@@ -849,6 +855,8 @@ if (idempotencyKey) {
 
 
     const userRef = db.collection('users').doc(uid)
+
+mark("about to start transaction")
 
     const result = await db.runTransaction(async (tx) => {
 
@@ -1217,7 +1225,10 @@ mark("response sent")
 return res.json(response)
 
   } catch (e) {
-    console.error('ISSUE CERT ERROR', e)
+console.error("ISSUE CERT ERROR")
+console.error("code:", e.code)
+console.error("message:", e.message)
+console.error("stack:", e.stack)
 
     if (e.message === 'PRO_REQUIRED') {
       return res.status(403).json({ ok: false, error: 'Pro plan required' })
