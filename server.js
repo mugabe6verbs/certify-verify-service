@@ -458,6 +458,61 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
   }
  }
 
+/* ============== Analytics Helpers ============== */
+
+async function recordCertificateIssued(orgId) {
+  if (!db || !orgId) return
+
+  await db
+    .collection("orgAnalytics")
+    .doc(orgId)
+    .set(
+      {
+        totalIssued:
+          admin.firestore.FieldValue.increment(1),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+}
+
+async function recordCertificateRevoked(orgId) {
+  if (!db || !orgId) return
+
+  await db
+    .collection("orgAnalytics")
+    .doc(orgId)
+    .set(
+      {
+        revoked:
+          admin.firestore.FieldValue.increment(1),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+}
+
+async function recordCertificateVerified(orgId) {
+  if (!db || !orgId) return
+
+  await db
+    .collection("orgAnalytics")
+    .doc(orgId)
+    .set(
+      {
+        totalVerifications:
+          admin.firestore.FieldValue.increment(1),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+}
 
  /* ============== Pesapal config ============== */
  const PESA_KEY    = clean(PESA_CONSUMER_KEY)
