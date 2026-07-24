@@ -110,7 +110,6 @@ function normalizeDomain(input) {
   let d = String(input).trim().toLowerCase()
 
   d = d.replace(/^https?:\/\//, '')
-  d = d.replace(/^www\./, '')
   d = d.replace(/\/+$/, '')
 
   return d
@@ -337,14 +336,14 @@ async function checkAndReserveQuota(uid, count) {
 // -----------------------------
 // Transaction-safe quota checker
 // -----------------------------
-async function checkAndConsumeQuotaTx(
-  tx,
-  userRef,
-  userData,
-  count = 1
-) {
+async function checkAndConsumeQuotaTx(tx, uid, count = 1)
+{
   if (!db) throw new Error("DB not available")
-const data = userData || {}
+const userRef = db.collection("users").doc(uid)
+
+const snap = await tx.get(userRef)
+
+const data = snap.exists ? snap.data() : {}
 
   const limits = resolveLimits(data)
 
@@ -863,11 +862,10 @@ if (
  const verifyUrl = `https://${domainUsed}/verify/${serial}`
 
       /* ---------- WRITE PHASE ---------- */
-      const quotaResult =
+     const quotaResult =
     await checkAndConsumeQuotaTx(
         tx,
-        userRef,
-        userData,
+        uid,
         1
     )
       if (!quotaResult.ok) {
@@ -1100,30 +1098,26 @@ titleTransform:
   ip: req.ip
  })
     
-   return { serial, verifyUrl, orgId }
+   return { serial, verifyUrl }
     })
 
    
     
  // Safe post-transaction log
  console.log("ISSUED CERT:", { uid, serial: result.serial })
-
 // ================= ANALYTICS UPDATE =================
- try {
-  const analyticsRef = db.collection("orgAnalytics").doc(result.orgId)
+try {
+  const userSnap = await db.collection('users').doc(uid).get()
+  const orgId = userSnap.data()?.orgId || uid
 
-  await analyticsRef.set(
-    {
-      totalIssued: admin.firestore.FieldValue.increment(1)
-    },
-    { merge: true }
-  )
+  const analyticsRef = db.collection("orgAnalytics").doc(orgId)
+
+  await analyticsRef.set({
+    totalIssued: admin.firestore.FieldValue.increment(1)
+  }, { merge: true })
 
 } catch (err) {
-  console.warn(
-    "⚠ analytics update failed (issue):",
-    err?.message || err
-  )
+  console.warn("⚠ analytics update failed (issue):", err?.message || err)
 }
    const response = {
   ok: true,
@@ -1169,7 +1163,6 @@ if (e.message === 'MISSING_REQUIRED_FIELDS') {
     return res.status(500).json({ ok: false, error: e.message || 'Server error' })
   }
 })
-
 // ======================================================
 // Reserve serials using Firestore WriteBatch
 // Splits writes automatically to stay below Firestore's
@@ -1328,9 +1321,8 @@ if (userData.status !== "approved") {
    }
  
   const orgId = userData.orgId || uid
-
-     /* ---------- WRITE PHASE ---------- */
-const quotaResult = await checkAndConsumeQuotaTx(
+ /* ---------- WRITE PHASE ---------- */
+await checkAndConsumeQuotaTx(
     tx,
     userRef,
     userData,
@@ -1406,7 +1398,7 @@ app.post('/api/certificates/revoke', authenticate, async (req, res) => {
    }
   const lookupRef = db.collection('certificateLookup').doc(normalizedSerial)
 
- const result = await db.runTransaction(async (tx) => {
+await db.runTransaction(async (tx) => {
 
   const lookupSnap = await tx.get(lookupRef)
 
@@ -1462,36 +1454,29 @@ app.post('/api/certificates/revoke', authenticate, async (req, res) => {
 })
 
   // Write history
-tx.set(certRef.collection('history').doc(), {
+  tx.set(certRef.collection('history').doc(), {
     action: 'revoked',
     by: uid,
     reason: reason || 'Revoked by issuer',
     at: now,
     source: 'api',
     ip: req.ip
-})
-
-return {
-    orgId
-}
+  })
 })
 
    // ================= ANALYTICS UPDATE =================
-   try {
-  await db.collection("orgAnalytics")
-    .doc(result.orgId)
-    .set(
-      {
-        revoked: admin.firestore.FieldValue.increment(1)
-      },
-      { merge: true }
-    )
+try {
+  const lookupSnap = await db.collection('certificateLookup').doc(normalizedSerial).get()
 
+  if (lookupSnap.exists) {
+    const { orgId } = lookupSnap.data()
+
+    await db.collection("orgAnalytics").doc(orgId).set({
+      revoked: admin.firestore.FieldValue.increment(1)
+    }, { merge: true })
+  }
 } catch (err) {
-  console.warn(
-    "⚠ analytics update failed (revoke):",
-    err?.message || err
-  )
+  console.warn("⚠ analytics update failed (revoke):", err?.message || err)
 }
 
 return res.json({ ok: true })
@@ -1511,7 +1496,6 @@ return res.json({ ok: true })
     return res.status(500).json({ ok: false, error: 'Server error' })
   }
 })
-
 
 /* ============== CERTIFICATE RESTORE ============== */
 app.post('/api/certificates/restore', authenticate, async (req, res) => {
@@ -1633,55 +1617,41 @@ app.get('/verify/:serial', verifyLimiter, async (req, res) => {
     if (!db) {
       return res.status(500).json({ ok: false })
     }
- const rawSerial = String(req.params.serial || '').toUpperCase()
 
-// ================= VALIDATE SERIAL FIRST =================
-const SERIAL_RE =
-  /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
-
-if (!SERIAL_RE.test(rawSerial)) {
-  return res.status(400).json({
-    ok: false,
-    error: "Invalid format",
-  })
-}
-
-if (looksSuspiciousSerial(rawSerial)) {
-  return res.status(400).json({ ok: false })
-}
-
-// ================= CACHE FIRST =================
-const cached = verifyCache.get(rawSerial)
-
-if (cached) {
-  return res.json(cached)
-}
-
-// ================= ABUSE TRACKING =================
+const rawSerial = String(req.params.serial || '').toUpperCase()
 const ip = String(req.ip || "unknown").replace(/[:.]/g, "_")
 
 const abuseKey = `${rawSerial}_${ip}`
 
-const abuseRef = db.collection("verifyAbuse").doc(abuseKey)
-
+const abuseRef = db.collection('verifyAbuse').doc(abuseKey)
 const abuseSnap = await abuseRef.get()
-
 const abuseData = abuseSnap.data() || {}
 
 if (abuseData.count && abuseData.count > 200) {
   return res.status(429).json({ ok: false })
 }
+await abuseRef.set({
+  count: admin.firestore.FieldValue.increment(1),
+  lastSeen: admin.firestore.FieldValue.serverTimestamp(),
+  expiresAt: admin.firestore.Timestamp.fromMillis(
+    Date.now() + 1000 * 60 * 60 * 24 // 24 hours
+  )
+}, { merge: true })
 
-await abuseRef.set(
-  {
-    count: admin.firestore.FieldValue.increment(1),
-    lastSeen: admin.firestore.FieldValue.serverTimestamp(),
-    expiresAt: admin.firestore.Timestamp.fromMillis(
-      Date.now() + 1000 * 60 * 60 * 24,
-    ),
-  },
-  { merge: true }
-)
+    // Check verification cache
+const cached = verifyCache.get(rawSerial)
+if (cached) {
+  return res.json(cached)
+}
+
+    const SERIAL_RE = /^([A-Z0-9]{6,16}|[A-Z0-9]{4}(-[A-Z0-9]{4}){2})$/
+
+    if (!SERIAL_RE.test(rawSerial)) {
+      return res.status(400).json({ ok: false, error: 'Invalid format' })
+    }
+  if (looksSuspiciousSerial(rawSerial)) {
+  return res.status(400).json({ ok: false })
+}
     let cert = null
  const certSnap = await db.collection('certificates').doc(rawSerial).get()
 
@@ -1718,7 +1688,6 @@ if (!cert) {
 if (cert.visibility === 'private') {
   return res.status(404).json({ ok: false })
 }
-
     // Fetch org for domain enforcement
     let orgData = null
     if (cert.orgId) {
