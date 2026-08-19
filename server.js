@@ -1901,7 +1901,10 @@ if (
 
   template: cert.template,
   accentColor: cert.accentColor || null,
-
+     
+ verifyUrl: cert.verifyUrl || null,
+  verificationDomain: cert.verificationDomain || null,
+     
   brand: cert.brand || null,
   i18n: cert.i18n || {},
 
