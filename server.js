@@ -1761,6 +1761,8 @@ await db.runTransaction(async (tx) => {
     ip: req.ip
   })
 })
+    // Invalidate cached verification response immediately after successful revoke
+verifyCache.delete(normalizedSerial)
 
    // ================= ANALYTICS UPDATE =================
 try {
@@ -1877,6 +1879,8 @@ await db.runTransaction(async (tx) => {
     ip: req.ip
   })
  })
+    // Invalidate cached verification response immediately after successful restore
+verifyCache.delete(normalizedSerial)
 
     return res.json({ ok: true })
 
