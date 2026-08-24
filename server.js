@@ -2472,6 +2472,7 @@ async function requireAdminAuth(req, res) {
   }
   
 }
+
  /* ============== Admin: set Pro ============== */
 app.post("/admin/setPro", async (req, res) => {
   const adminUser = await requireAdminAuth(req, res)
@@ -2484,11 +2485,11 @@ app.post("/admin/setPro", async (req, res) => {
         error: "Server missing Firebase credentials",
       })
     }
-
-   const {
+const {
   uid,
   pro = true,
   planId = "pro_monthly",
+   durationDays,
   note = "manual admin activation",
 } = req.body || {}
 
@@ -2508,14 +2509,27 @@ const allowedPlans = {
   pro_yearly: "year",
 }
 
-if (!Object.prototype.hasOwnProperty.call(allowedPlans, planId)) {
+const allowedTrialDays = [1, 3, 7, 14, 30]
+
+let interval = null
+
+if (planId === "admin_trial") {
+  const days = Number(durationDays)
+
+  if (!Number.isInteger(days) || !allowedTrialDays.includes(days)) {
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid trial duration",
+    })
+  }
+} else if (Object.prototype.hasOwnProperty.call(allowedPlans, planId)) {
+  interval = allowedPlans[planId]
+} else {
   return res.status(400).json({
     ok: false,
     error: "Invalid plan",
   })
 }
-
-const interval = allowedPlans[planId]
 
     // 🔹 Update user subscription
     const userRef = db.collection("users").doc(String(uid))
@@ -2526,14 +2540,32 @@ const base = Math.max(
   Number(userSnap.get("proUntil") || 0)
 )
 
-const proUntil = !!pro ? addInterval(base, interval) : null
+let proUntil = null
+
+if (pro) {
+  if (planId === "admin_trial") {
+    proUntil =
+      base +
+      Number(durationDays) * 24 * 60 * 60 * 1000
+  } else {
+    proUntil = addInterval(base, interval)
+  }
+}
 
 await userRef.set(
   {
-    pro: !!pro,
-    planId,
-    proUntil,
-    proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+   pro: !!pro,
+planId,
+proUntil,
+proSetAt: admin.firestore.FieldValue.serverTimestamp(),
+
+adminTrial:
+  planId === "admin_trial"
+    ? {
+        durationDays: Number(durationDays),
+        grantedBy: adminUser.uid,
+      }
+    : null,
     lastPayment: {
       provider: "admin",
       note,
@@ -2555,12 +2587,16 @@ await sendProActivationEmail(uid, planId)
       action: "set_pro",
       adminUid: adminUser.uid,
       targetUid: String(uid),
-      meta: {
-        pro: !!pro,
-        planId,
-        interval,
-        note,
-      },
+     meta: {
+  pro: !!pro,
+  planId,
+  interval,
+  durationDays:
+    planId === "admin_trial"
+      ? Number(durationDays)
+      : null,
+  note,
+},
     })
 
     return res.json({
