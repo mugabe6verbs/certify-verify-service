@@ -2485,17 +2485,37 @@ app.post("/admin/setPro", async (req, res) => {
       })
     }
 
-    const {
-      uid,
-      pro = true,
-      planId = "pro_monthly",
-      interval = "month",
-      note = "manual admin activation",
-    } = req.body || {}
+   const {
+  uid,
+  pro = true,
+  planId = "pro_monthly",
+  note = "manual admin activation",
+} = req.body || {}
 
-    if (!uid) {
-      return res.status(400).json({ ok: false, error: "Missing uid" })
-    }
+if (
+  typeof uid !== "string" ||
+  uid.trim().length === 0 ||
+  uid.length > 128
+) {
+  return res.status(400).json({
+    ok: false,
+    error: "Invalid uid",
+  })
+}
+
+const allowedPlans = {
+  pro_monthly: "month",
+  pro_yearly: "year",
+}
+
+if (!Object.prototype.hasOwnProperty.call(allowedPlans, planId)) {
+  return res.status(400).json({
+    ok: false,
+    error: "Invalid plan",
+  })
+}
+
+const interval = allowedPlans[planId]
 
     // 🔹 Update user subscription
     const userRef = db.collection("users").doc(String(uid))
