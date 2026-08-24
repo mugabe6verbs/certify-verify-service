@@ -659,6 +659,19 @@ app.options("*", cors(corsOptions))
   legacyHeaders: false
  })
 
+ /* ============== Public Contact ============== */
+
+const contactLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    ok: false,
+    error: "Too many contact requests. Please try again later."
+  }
+})
+
  /* ======================================================
    AUTH
  ====================================================== */
@@ -693,6 +706,219 @@ app.options("*", cors(corsOptions))
   app.get(['/health','/api/health'], (_req, res) => {
   res.json({ ok: true })
  })
+
+ /* ======================================================
+   PUBLIC CONTACT
+   Login is NOT required.
+====================================================== */
+
+app.post(
+  "/api/contact",
+  contactLimiter,
+  async (req, res) => {
+    try {
+      if (!db) {
+        return res.status(500).json({
+          ok: false,
+          error: "Server missing Firebase credentials"
+        })
+      }
+
+      const {
+        name,
+        email,
+        topic,
+        message,
+        txRef,
+        honeypot,
+        tz,
+        lang,
+        path,
+        appVersion
+      } = req.body || {}
+
+      /* -----------------------------------------------
+         Honeypot
+      ------------------------------------------------ */
+
+      if (honeypot) {
+        // Return success without storing bot submissions.
+        return res.json({ ok: true })
+      }
+
+      /* -----------------------------------------------
+         Normalize
+      ------------------------------------------------ */
+
+      const cleanName =
+        typeof name === "string"
+          ? name.trim()
+          : ""
+
+      const cleanEmail =
+        typeof email === "string"
+          ? email.trim().toLowerCase()
+          : ""
+
+      const cleanTopic =
+        typeof topic === "string"
+          ? topic.trim()
+          : "support"
+
+      const cleanMessage =
+        typeof message === "string"
+          ? message.trim()
+          : ""
+
+      const cleanTxRef =
+        typeof txRef === "string"
+          ? txRef.trim()
+          : ""
+
+      /* -----------------------------------------------
+         Validation
+      ------------------------------------------------ */
+
+      if (
+        cleanName.length < 2 ||
+        cleanName.length > 80
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid name"
+        })
+      }
+
+      if (
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+          cleanEmail
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid email address"
+        })
+      }
+
+      const allowedTopics = new Set([
+        "support",
+        "refund",
+        "bug",
+        "feature",
+        "other"
+      ])
+
+      if (!allowedTopics.has(cleanTopic)) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid contact topic"
+        })
+      }
+
+      if (
+        cleanMessage.length < 10 ||
+        cleanMessage.length > 2000
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Message must be between 10 and 2000 characters"
+        })
+      }
+
+      if (cleanTxRef.length > 200) {
+        return res.status(400).json({
+          ok: false,
+          error: "Reference is too long"
+        })
+      }
+
+      /* -----------------------------------------------
+         Optional authenticated identity
+      ------------------------------------------------ */
+
+      let authenticatedUid = null
+
+      try {
+        const decoded = await verifyToken(req)
+
+        if (decoded?.uid) {
+          authenticatedUid = decoded.uid
+        }
+      } catch {
+        authenticatedUid = null
+      }
+
+      /* -----------------------------------------------
+         Store server-controlled record
+      ------------------------------------------------ */
+
+      const contactRef =
+        await db.collection("contact").add({
+          ownerUid: authenticatedUid,
+
+          name: cleanName,
+          email: cleanEmail,
+          topic: cleanTopic,
+          message: cleanMessage,
+          txRef: cleanTxRef || null,
+
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+          status: "open",
+
+          tz:
+            typeof tz === "string"
+              ? tz.slice(0, 100)
+              : null,
+
+          lang:
+            typeof lang === "string"
+              ? lang.slice(0, 50)
+              : null,
+
+          path:
+            typeof path === "string"
+              ? path.slice(0, 500)
+              : null,
+
+          appVersion:
+            typeof appVersion === "string"
+              ? appVersion.slice(0, 50)
+              : null,
+
+          source: "help_center",
+
+          userAgent:
+            req.headers["user-agent"] || null,
+
+          ip:
+            req.ip || null
+        })
+
+      console.info("PUBLIC_CONTACT_RECEIVED", {
+        id: contactRef.id,
+        topic: cleanTopic,
+        authenticated: !!authenticatedUid
+      })
+
+      return res.json({
+        ok: true
+      })
+
+    } catch (e) {
+      console.error(
+        "Public contact submission failed:",
+        e
+      )
+
+      return res.status(500).json({
+        ok: false,
+        error: "Unable to submit contact request"
+      })
+    }
+  }
+)
 
  app.get('/pesapal/health', authenticate, async (req, res) => {
   try {
