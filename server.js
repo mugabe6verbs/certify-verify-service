@@ -3071,7 +3071,27 @@ if (
   })
 }
 
-    
+   // Preliminary registry check.
+// This improves the user-facing response when the domain
+// is already registered to another organization.
+//
+// IMPORTANT:
+// This is NOT the final ownership check.
+// The transaction below remains authoritative and race-safe.
+const domainRef = db.collection('domainRegistry').doc(domain)
+
+const existingDomainSnap = await domainRef.get()
+
+if (existingDomainSnap.exists) {
+  const existingDomain = existingDomainSnap.data()
+
+  if (existingDomain.orgId !== orgId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Domain already in use by another organization'
+    })
+  }
+} 
 
     // Attempt CNAME lookup then TXT fallback
     let verified = false
@@ -3101,7 +3121,6 @@ if (
 }
 
 const orgRef = db.collection('orgs').doc(orgId)
-const domainRef = db.collection('domainRegistry').doc(domain)
 
 if (verified) {
   await db.runTransaction(async (tx) => {
