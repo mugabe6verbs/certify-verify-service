@@ -3071,18 +3071,6 @@ if (
   })
 }
 
-   //  Prevent domain reuse across organizations
-  const existing = await db
-  .collection('orgs')
-  .where('customVerifyDomain', '==', domain)
-  .get()
-
-  if (!existing.empty && existing.docs[0].id !== orgId) {
-  return res.status(400).json({
-    ok: false,
-    error: 'Domain already in use by another organization'
-  })
- }
     
 
     // Attempt CNAME lookup then TXT fallback
@@ -3112,16 +3100,76 @@ if (
   }
 }
 
-   await db.collection('orgs').doc(orgId).set({
-  customVerifyDomain: domain,
-  domainVerified: verified,
-  domainVerifiedAt: verified ? admin.firestore.FieldValue.serverTimestamp() : null
-}, { merge: true })
-    res.json({ ok: true, domain, verified, cnames })
+const orgRef = db.collection('orgs').doc(orgId)
+const domainRef = db.collection('domainRegistry').doc(domain)
 
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || String(e) })
+if (verified) {
+  await db.runTransaction(async (tx) => {
+
+    const domainSnap = await tx.get(domainRef)
+
+    if (domainSnap.exists) {
+      const existing = domainSnap.data()
+
+      if (existing.orgId !== orgId) {
+        throw new Error('DOMAIN_ALREADY_IN_USE')
+      }
+    }
+
+    tx.set(
+      domainRef,
+      {
+        orgId,
+        domain,
+        verifiedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    )
+
+    tx.set(
+      orgRef,
+      {
+        customVerifyDomain: domain,
+        domainVerified: true,
+        domainVerifiedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    )
+  })
+} else {
+  await orgRef.set(
+    {
+      customVerifyDomain: domain,
+      domainVerified: false,
+      domainVerifiedAt: null
+    },
+    { merge: true }
+  )
+}
+
+return res.json({
+  ok: true,
+  domain,
+  verified,
+  cnames
+})
+} catch (e) {
+
+  if (e?.message === 'DOMAIN_ALREADY_IN_USE') {
+    return res.status(400).json({
+      ok: false,
+      error: 'Domain already in use by another organization'
+    })
   }
+
+  console.error('ORG DOMAIN VERIFICATION ERROR:', e)
+
+  return res.status(500).json({
+    ok: false,
+    error: 'Unable to verify custom domain'
+  })
+}
 })
 
 app.use((err, req, res, next) => {
