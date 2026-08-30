@@ -3097,11 +3097,7 @@ if (paid && db && uid && orderSnap) {
         admin.firestore.FieldValue.serverTimestamp(),
       statusPayload: status,
 
-      // IMPORTANT:
-      // Only set false when the order has NOT
-      // already been reconciled.
-      reconciled: false,
-    },
+      },
     { merge: true }
   )
 
