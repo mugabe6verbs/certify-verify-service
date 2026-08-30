@@ -398,6 +398,7 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
 
 async function reconcileForUser(uid) {
   if (!db) throw new Error("DB not available")
+
   if (!uid) {
     return {
       ok: false,
@@ -406,8 +407,8 @@ async function reconcileForUser(uid) {
     }
   }
 
-  // Find the latest paid order that has not yet
-  // had its entitlement applied.
+  // Find the latest paid subscription order
+  // that has not yet had its entitlement applied.
   const snap = await db
     .collection("orders")
     .where("uid", "==", uid)
@@ -437,11 +438,16 @@ async function reconcileForUser(uid) {
   const interval =
     INTERVAL_BY_PLAN[finalPlanId] || "month"
 
-  const userRef = db.collection("users").doc(uid)
+  const userRef =
+    db.collection("users").doc(uid)
 
   let result = null
 
   await db.runTransaction(async (tx) => {
+    // IMPORTANT:
+    // Re-read the order inside the transaction so that
+    // concurrent IPN/browser reconciliation requests
+    // cannot both consume the same payment.
     const freshOrderSnap = await tx.get(orderRef)
 
     if (!freshOrderSnap.exists) {
@@ -451,8 +457,7 @@ async function reconcileForUser(uid) {
     const freshOrder = freshOrderSnap.data()
 
     // Idempotency guard.
-    // Another request may have reconciled this order
-    // between the query above and this transaction.
+    // Another request may already have processed this payment.
     if (
       freshOrder.status === "paid" &&
       freshOrder.reconciled === true
@@ -461,7 +466,8 @@ async function reconcileForUser(uid) {
         ok: true,
         reconciled: false,
         reason: "already_reconciled",
-        planId: freshOrder.planId || finalPlanId,
+        planId:
+          freshOrder.planId || finalPlanId,
         orderId: orderRef.id,
       }
 
@@ -490,6 +496,10 @@ async function reconcileForUser(uid) {
     const existingProUntil =
       Number(userData.proUntil || 0)
 
+    // If the customer already has active Pro,
+    // extend from the current expiry.
+    //
+    // If Pro has expired, start from now.
     const base = Math.max(
       Date.now(),
       existingProUntil
@@ -498,8 +508,7 @@ async function reconcileForUser(uid) {
     const proUntil =
       addInterval(base, interval)
 
-    // Apply entitlement and mark the exact order
-    // reconciled in the SAME Firestore transaction.
+    // Apply the entitlement.
     tx.set(
       userRef,
       {
@@ -508,18 +517,26 @@ async function reconcileForUser(uid) {
         proUntil,
         proSetAt:
           admin.firestore.FieldValue.serverTimestamp(),
+
         lastPayment: {
           provider:
             freshOrder.provider || "pesapal",
-          orderId: orderRef.id,
+
+          orderId:
+            orderRef.id,
+
           orderTrackingId:
             freshOrder.orderTrackingId || null,
+
           merchant_reference:
             orderRef.id,
+
           amount:
             freshOrder.amount || null,
+
           currency:
             freshOrder.currency || null,
+
           reconciledAt:
             admin.firestore.FieldValue.serverTimestamp(),
         },
@@ -527,6 +544,8 @@ async function reconcileForUser(uid) {
       { merge: true }
     )
 
+    // Mark THIS exact payment as reconciled
+    // in the SAME transaction.
     tx.set(
       orderRef,
       {
@@ -546,9 +565,9 @@ async function reconcileForUser(uid) {
     }
   })
 
-  // Email is outside the entitlement transaction.
-  // It must never prevent the payment entitlement
-  // from being activated.
+  // Email is deliberately outside the entitlement
+  // transaction. Email failure must never roll back
+  // a successful Pro activation.
   if (result?.reconciled) {
     const latestOrderSnap =
       await orderRef.get()
@@ -2856,7 +2875,7 @@ if (req.user.firebase?.sign_in_provider === 'anonymous') {
 
     // Persist order record ENSURING we use merchantRef as id
     await db.collection('orders').doc(merchantRef).set({
-      type: 'subscription', planId, amount, currency: CURRENCY, status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp(), uid, provider: 'pesapal', orderTrackingId: data?.order_tracking_id || null, base
+      type: 'subscription', planId, amount, currency: CURRENCY, status: 'pending', reconciled: false, createdAt: admin.firestore.FieldValue.serverTimestamp(), uid, provider: 'pesapal', orderTrackingId: data?.order_tracking_id || null, base
     }, { merge: true })
 
     return res.json({ ok: true, baseUsed: base, redirect_url: redirectUrl, order_tracking_id: data?.order_tracking_id, merchant_reference: merchantRef })
@@ -3032,18 +3051,43 @@ if (
       "Payment currency does not match the selected plan.",
   })
 }
-    
-/* ---------- Continue if paid ---------- */
+   /* ---------- Continue if paid ---------- */
 
 if (paid && db && uid && orderSnap) {
 
   const orderRef = orderSnap.ref
 
+  const currentOrder =
+    orderSnap.data() || {}
+
   /*
-   * The payment has been verified directly with Pesapal.
+   * If this exact payment has already been
+   * reconciled, do nothing.
    *
-   * Mark it paid first, then let the single
-   * idempotent reconciliation path apply the
+   * This makes duplicate Pesapal IPNs safe.
+   */
+  if (
+    currentOrder.status === "paid" &&
+    currentOrder.reconciled === true
+  ) {
+    console.log(
+      "⏭️ Payment already reconciled:",
+      orderRef.id
+    )
+
+    return res.json({
+      ok: true,
+      status,
+      reconciled: true,
+    })
+  }
+
+  /*
+   * Payment has been independently verified
+   * directly with Pesapal.
+   *
+   * Mark it paid and leave it unreconciled so
+   * reconcileForUser() can atomically apply the
    * entitlement.
    */
   await orderRef.set(
@@ -3052,6 +3096,10 @@ if (paid && db && uid && orderSnap) {
       paidAt:
         admin.firestore.FieldValue.serverTimestamp(),
       statusPayload: status,
+
+      // IMPORTANT:
+      // Only set false when the order has NOT
+      // already been reconciled.
       reconciled: false,
     },
     { merge: true }
@@ -3070,6 +3118,7 @@ if (paid && db && uid && orderSnap) {
   )
 
 } else {
+
   // Not paid / missing data — record failure
   await db
     ?.collection("orders")
