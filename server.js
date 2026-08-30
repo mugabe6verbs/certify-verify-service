@@ -292,7 +292,7 @@ const PLAN_LIMITS = {
   free:        { monthly: 10,   daily: 5 },
   pro_monthly: { monthly: 300,  daily: 100 },
   pro_yearly:  { monthly: 1000, daily: 300 },
-  admin_trial: { monthly: 300,  daily: 100 },
+  admin_trial: { monthly: 30,  daily: 10 },
   pro_admin:   { monthly: 100000, daily: 10000 },
   pro:         { monthly: 300,  daily: 100 } // fallback
 }
