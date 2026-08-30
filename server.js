@@ -287,19 +287,34 @@ function computeMonthlyCount(data) {
 }
 
 // Daily + Monthly limits by plan (SERVER AUTHORITY)
+
 const PLAN_LIMITS = {
-  free:        { monthly: 10,  daily: 5   },
-  pro_monthly:{ monthly: 300, daily: 100 },
-  pro_yearly: { monthly: 1000,daily: 300 },
-  pro_admin: { monthly: 100000, daily: 10000 },
-  pro:        { monthly: 300, daily: 100 } // fallback
+  free:        { monthly: 10,   daily: 5 },
+  pro_monthly: { monthly: 300,  daily: 100 },
+  pro_yearly:  { monthly: 1000, daily: 300 },
+  admin_trial: { monthly: 300,  daily: 100 },
+  pro_admin:   { monthly: 100000, daily: 10000 },
+  pro:         { monthly: 300,  daily: 100 } // fallback
 }
 
 // Resolve plan → limits safely
 function resolveLimits(data) {
-  // ADMIN override
+
+  // PLATFORM ADMIN override
   if (data?.isAdmin === true) {
     return PLAN_LIMITS.pro_admin
+  }
+
+  // proUntil is the authority for active Pro access.
+  // Support both Firestore Timestamp and numeric milliseconds.
+  const proUntil =
+    typeof data?.proUntil?.toMillis === "function"
+      ? data.proUntil.toMillis()
+      : Number(data?.proUntil || 0)
+
+  // No valid expiry or expiry has passed → FREE limits.
+  if (!proUntil || Date.now() >= proUntil) {
+    return PLAN_LIMITS.free
   }
 
   const raw = String(data?.planId || "free").toLowerCase()
@@ -379,84 +394,194 @@ async function checkAndConsumeQuotaTx(tx, uid, count = 1) {
     usedThisMonth: usedThisMonth + count,
   }
 }
-
-
 /* ============== Billing Reconcile Helper ============== */
- async function reconcileForUser(uid) {
-  if (!db) throw new Error("DB not available")
 
-  // Find latest paid subscription order
+async function reconcileForUser(uid) {
+  if (!db) throw new Error("DB not available")
+  if (!uid) {
+    return {
+      ok: false,
+      reconciled: false,
+      reason: "missing_uid",
+    }
+  }
+
+  // Find the latest paid order that has not yet
+  // had its entitlement applied.
   const snap = await db
-  .collection("orders")
-  .where("uid", "==", uid)
-  .where("status", "==", "paid")
-  .where("reconciled", "==", false)
-  .orderBy("paidAt", "desc")
-  .limit(1)
-  .get()
+    .collection("orders")
+    .where("uid", "==", uid)
+    .where("status", "==", "paid")
+    .where("reconciled", "==", false)
+    .orderBy("paidAt", "desc")
+    .limit(1)
+    .get()
 
   if (snap.empty) {
-    return { ok: true, reconciled: false, reason: "no_paid_orders" }
+    return {
+      ok: true,
+      reconciled: false,
+      reason: "no_paid_orders",
+    }
   }
 
   const orderDoc = snap.docs[0]
+  const orderRef = orderDoc.ref
   const order = orderDoc.data()
 
   const finalPlanId =
-    order.planId || amountToPlanId(order.amount) || "pro_monthly"
+    order.planId ||
+    amountToPlanId(order.amount) ||
+    "pro_monthly"
 
-  const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
+  const interval =
+    INTERVAL_BY_PLAN[finalPlanId] || "month"
+
   const userRef = db.collection("users").doc(uid)
-  const userSnap = await userRef.get()
-  const now = Date.now()
-  const existingProUntil = Number(userSnap.get("proUntil") || 0)
 
- if (existingProUntil > now) {
-  return {
-    ok: true,
-    reconciled: false,
-    reason: "subscription_already_active",
-  }
- }
- if (!userSnap.exists) {
-  return { ok: false, reconciled: false, reason: "user_missing" }
- }
+  let result = null
 
- const base = Math.max(
-  Date.now(),
-  Number(userSnap.get("proUntil") || 0)
- )
+  await db.runTransaction(async (tx) => {
+    const freshOrderSnap = await tx.get(orderRef)
 
- const proUntil = addInterval(base, interval)
+    if (!freshOrderSnap.exists) {
+      throw new Error("ORDER_NOT_FOUND")
+    }
 
+    const freshOrder = freshOrderSnap.data()
 
-  // Idempotent upgrade (safe to run multiple times)
-  await userRef.set(
-    {
-      pro: true,
-      planId: finalPlanId,
-      proUntil,
-      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastPayment: {
-        provider: order.provider || "pesapal",
-        orderId: orderDoc.id,
-        reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Idempotency guard.
+    // Another request may have reconciled this order
+    // between the query above and this transaction.
+    if (
+      freshOrder.status === "paid" &&
+      freshOrder.reconciled === true
+    ) {
+      result = {
+        ok: true,
+        reconciled: false,
+        reason: "already_reconciled",
+        planId: freshOrder.planId || finalPlanId,
+        orderId: orderRef.id,
+      }
+
+      return
+    }
+
+    if (freshOrder.status !== "paid") {
+      result = {
+        ok: true,
+        reconciled: false,
+        reason: "order_not_paid",
+        orderId: orderRef.id,
+      }
+
+      return
+    }
+
+    const userSnap = await tx.get(userRef)
+
+    if (!userSnap.exists) {
+      throw new Error("USER_NOT_FOUND")
+    }
+
+    const userData = userSnap.data() || {}
+
+    const existingProUntil =
+      Number(userData.proUntil || 0)
+
+    const base = Math.max(
+      Date.now(),
+      existingProUntil
+    )
+
+    const proUntil =
+      addInterval(base, interval)
+
+    // Apply entitlement and mark the exact order
+    // reconciled in the SAME Firestore transaction.
+    tx.set(
+      userRef,
+      {
+        pro: true,
+        planId: finalPlanId,
+        proUntil,
+        proSetAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+        lastPayment: {
+          provider:
+            freshOrder.provider || "pesapal",
+          orderId: orderRef.id,
+          orderTrackingId:
+            freshOrder.orderTrackingId || null,
+          merchant_reference:
+            orderRef.id,
+          amount:
+            freshOrder.amount || null,
+          currency:
+            freshOrder.currency || null,
+          reconciledAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        },
       },
-    },
-    { merge: true }
-  )
-  await sendProActivationEmail(uid, finalPlanId)
- await orderDoc.ref.update({
-  reconciled: true,
-  reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
- })
-  return {
-    ok: true,
-    reconciled: true,
-    planId: finalPlanId,
-    orderId: orderDoc.id,
+      { merge: true }
+    )
+
+    tx.set(
+      orderRef,
+      {
+        reconciled: true,
+        reconciledAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+
+    result = {
+      ok: true,
+      reconciled: true,
+      planId: finalPlanId,
+      orderId: orderRef.id,
+      proUntil,
+    }
+  })
+
+  // Email is outside the entitlement transaction.
+  // It must never prevent the payment entitlement
+  // from being activated.
+  if (result?.reconciled) {
+    const latestOrderSnap =
+      await orderRef.get()
+
+    if (
+      latestOrderSnap.exists &&
+      !latestOrderSnap.get("emailSent")
+    ) {
+      try {
+        await sendProActivationEmail(
+          uid,
+          result.planId
+        )
+
+        await orderRef.set(
+          {
+            emailSent: true,
+            emailSentAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        )
+      } catch (emailError) {
+        console.error(
+          "Pro activation email failed:",
+          emailError
+        )
+      }
+    }
   }
- }
+
+  return result
+}
 
 /* ============== Analytics Helpers ============== */
 
@@ -2867,99 +2992,81 @@ if (paid && (!orderSnap || !orderSnap.exists)) {
 
     const amount = status?.amount
 const currency = String(status?.currency || CURRENCY).toUpperCase()
+    
 /* ---------- PAYMENT AMOUNT VERIFICATION ---------- */
-const expectedAmount = AMOUNT_BY_PLAN[planId]
+ const expectedAmount = AMOUNT_BY_PLAN[planId]
 
-if (paid && expectedAmount && Number(amount) !== Number(expectedAmount)) {
-  console.warn("⚠ Amount mismatch (non-blocking)", {
+if (
+  paid &&
+  expectedAmount &&
+  Number(amount) !== Number(expectedAmount)
+) {
+  console.error("❌ Payment amount mismatch", {
     amount,
     expectedAmount,
     planId,
-    currency
+    currency,
+  })
+
+  return res.status(400).json({
+    ok: false,
+    error:
+      "Payment amount does not match the selected plan.",
   })
 }
 
+    if (
+  paid &&
+  currency !== String(CURRENCY).toUpperCase()
+) {
+  console.error("❌ Payment currency mismatch", {
+    currency,
+    expectedCurrency:
+      String(CURRENCY).toUpperCase(),
+    planId,
+  })
 
+  return res.status(400).json({
+    ok: false,
+    error:
+      "Payment currency does not match the selected plan.",
+  })
+}
+    
 /* ---------- Continue if paid ---------- */
+
 if (paid && db && uid && orderSnap) {
 
-  const alreadyPaid = orderSnap.get("status") === "paid"
-
-if (alreadyPaid) {
-  console.log("⏭️ Skipping already processed payment:", orderTrackingId)
-
-  return res.json({ ok: true, status })
-}
   const orderRef = orderSnap.ref
 
-  const userRef = db.collection("users").doc(uid)
-  const userSnap = await userRef.get()
-
-  // Create minimal user profile if missing (race-safe)
-  if (!userSnap.exists) {
-    console.warn("⚠ Creating minimal user profile for paid order:", uid)
-
-    await userRef.set(
-      {
-        uid,
-        email: status?.billing_address?.email || null,
-        planId: "free",
-        pro: false,
-        systemCreated: true,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    )
-  }
-
-  const finalPlanId = planId || amountToPlanId(amount) || "pro_monthly"
-  const interval = INTERVAL_BY_PLAN[finalPlanId] || "month"
-
-  const base = Math.max(
-    Date.now(),
-    Number(userSnap.get("proUntil") || 0)
-  )
-
-  const proUntil = addInterval(base, interval)
-
-  // Server is source of truth — always apply upgrade
-  await userRef.set(
-    {
-      pro: true,
-      planId: finalPlanId,
-      proUntil,
-      proSetAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastPayment: {
-        provider: "pesapal",
-        orderTrackingId,
-        merchant_reference: mr,
-        amount,
-        currency,
-        status: status?.payment_status_description,
-      },
-    },
-    { merge: true }
-  )
-
-  // Send activation email once
-  if (!orderSnap.get("emailSent")) {
-    try {
-      await sendProActivationEmail(uid, finalPlanId)
-      await orderRef.set({ emailSent: true }, { merge: true })
-    } catch (e) {
-      console.error("Pro activation email failed:", e)
-    }
-  }
-
-  // Mark order as paid
+  /*
+   * The payment has been verified directly with Pesapal.
+   *
+   * Mark it paid first, then let the single
+   * idempotent reconciliation path apply the
+   * entitlement.
+   */
   await orderRef.set(
     {
       status: "paid",
-      paidAt: admin.firestore.FieldValue.serverTimestamp(),
+      paidAt:
+        admin.firestore.FieldValue.serverTimestamp(),
       statusPayload: status,
+      reconciled: false,
     },
     { merge: true }
+  )
+
+  const reconciliation =
+    await reconcileForUser(uid)
+
+  console.log(
+    "✅ Payment reconciliation result:",
+    {
+      uid,
+      orderId: orderRef.id,
+      ...reconciliation,
+    }
   )
 
 } else {
@@ -2967,11 +3074,16 @@ if (alreadyPaid) {
   await db
     ?.collection("orders")
     .doc(mr || orderTrackingId)
-    .set({ status: "failed", statusPayload: status }, { merge: true })
+    .set(
+      {
+        status: "failed",
+        statusPayload: status,
+      },
+      { merge: true }
+    )
     .catch(() => {})
 }
-
-
+    
 /* ---------- IPN RESPONSE ---------- */
 if (params?.OrderNotificationType === "IPNCHANGE") {
   return res.json({
