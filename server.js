@@ -2866,18 +2866,131 @@ if (req.user.firebase?.sign_in_provider === 'anonymous') {
       }
     }
 
-    const { data } = await axios.post(
-      `${url}/api/Transactions/SubmitOrderRequest`,
-      payload,
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' } }
-    )
+  console.log("🟡 PESAPAL SUBMIT START", {
+  base,
+  url,
+  uid,
+  planId,
+  amount,
+  currency: CURRENCY,
+  merchantRef,
+  ipnConfigured: !!PESA_IPN_ID,
+})
 
-    const redirectUrl =
-      data?.redirect_url || data?.order_instructions?.redirect_url || data?.payment_url || null
+let pesaResponse
 
-    if (!redirectUrl) {
-      return res.status(502).json({ ok: false, error: 'Pesapal did not return redirect_url', provider_echo: { has_order_tracking_id: !!data?.order_tracking_id, keys: Object.keys(data || {}) } })
+try {
+  pesaResponse = await axios.post(
+    `${url}/api/Transactions/SubmitOrderRequest`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      timeout: 15000,
+      validateStatus: () => true,
     }
+  )
+} catch (e) {
+  console.error("🔴 PESAPAL SUBMIT NETWORK ERROR", {
+    base,
+    url,
+    uid,
+    planId,
+    merchantRef,
+    message: e?.message,
+    code: e?.code,
+  })
+
+  return res.status(502).json({
+    ok: false,
+    error: "Unable to reach Pesapal",
+  })
+}
+
+const data = pesaResponse.data
+
+console.log("🟡 PESAPAL SUBMIT RESPONSE", {
+  base,
+  httpStatus: pesaResponse.status,
+  uid,
+  planId,
+  merchantRef,
+  keys:
+    data && typeof data === "object"
+      ? Object.keys(data)
+      : [],
+  hasOrderTrackingId: !!data?.order_tracking_id,
+  hasRedirectUrl: !!data?.redirect_url,
+  providerError:
+    typeof data?.error === "string"
+      ? data.error
+      : data?.error?.message || null,
+  providerStatus: data?.status ?? null,
+})
+
+if (pesaResponse.status < 200 || pesaResponse.status >= 300) {
+  console.error("🔴 PESAPAL ORDER REJECTED", {
+    base,
+    httpStatus: pesaResponse.status,
+    uid,
+    planId,
+    merchantRef,
+    providerError: data?.error || null,
+    providerStatus: data?.status ?? null,
+  })
+
+  return res.status(502).json({
+    ok: false,
+    error: "Pesapal rejected the payment request",
+    provider_echo: {
+      http_status: pesaResponse.status,
+      keys: Object.keys(data || {}),
+      error:
+        typeof data?.error === "string"
+          ? data.error
+          : data?.error?.message || null,
+      status: data?.status ?? null,
+    },
+  })
+}
+
+const redirectUrl =
+  data?.redirect_url ||
+  data?.order_instructions?.redirect_url ||
+  data?.payment_url ||
+  null
+
+if (!redirectUrl) {
+  console.error("🔴 PESAPAL SUCCESS RESPONSE MISSING REDIRECT", {
+    base,
+    httpStatus: pesaResponse.status,
+    uid,
+    planId,
+    merchantRef,
+    keys: Object.keys(data || {}),
+    hasOrderTrackingId: !!data?.order_tracking_id,
+    providerError: data?.error || null,
+    providerStatus: data?.status ?? null,
+  })
+
+  return res.status(502).json({
+    ok: false,
+    error: "Pesapal returned an unexpected order response",
+    provider_echo: {
+      http_status: pesaResponse.status,
+      keys: Object.keys(data || {}),
+      has_order_tracking_id: !!data?.order_tracking_id,
+      error:
+        typeof data?.error === "string"
+          ? data.error
+          : data?.error?.message || null,
+      status: data?.status ?? null,
+    },
+  })
+}
 
     // Persist order record ENSURING we use merchantRef as id
     await db.collection('orders').doc(merchantRef).set({
