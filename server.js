@@ -1,9 +1,3 @@
-
-
-
-
-
-
 import express from 'express'
 import axios from 'axios'
 import admin from 'firebase-admin'
@@ -262,9 +256,47 @@ function addInterval(ms, interval) {
   if (interval === 'year') d.setUTCFullYear(d.getUTCFullYear() + 1)
   else d.setUTCMonth(d.getUTCMonth() + 1)
   return d.getTime()
-
-  
 }
+
+function getPaymentErrorResponse(data) {
+  const providerError = data?.error
+
+  const errorType =
+    typeof providerError === "object"
+      ? providerError?.error_type
+      : null
+
+  const providerCode =
+    typeof providerError === "object"
+      ? providerError?.code
+      : null
+
+  if (
+    errorType === "test_transactions_exceeded" ||
+    providerCode === "maximum_amount_limit_exceeded"
+  ) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        code: "PAYMENT_TEMPORARILY_UNAVAILABLE",
+        error:
+          "Payment is temporarily unavailable. Please try again later.",
+      },
+    }
+  }
+
+  return {
+    status: 502,
+    body: {
+      ok: false,
+      code: "PAYMENT_START_FAILED",
+      error:
+        "We couldn't start your payment. Please try again.",
+    },
+  }
+}
+
 // ================= QUOTA HELPERS  =================
 
 // YYYY-MM-DD (UTC)
@@ -2930,7 +2962,6 @@ console.log("🟡 PESAPAL SUBMIT RESPONSE", {
       : data?.error?.message || null,
   providerStatus: data?.status ?? null,
 })
-
 if (pesaResponse.status < 200 || pesaResponse.status >= 300) {
   console.error("🔴 PESAPAL ORDER REJECTED", {
     base,
@@ -2942,21 +2973,12 @@ if (pesaResponse.status < 200 || pesaResponse.status >= 300) {
     providerStatus: data?.status ?? null,
   })
 
-  return res.status(502).json({
-    ok: false,
-    error: "Pesapal rejected the payment request",
-    provider_echo: {
-      http_status: pesaResponse.status,
-      keys: Object.keys(data || {}),
-      error:
-        typeof data?.error === "string"
-          ? data.error
-          : data?.error?.message || null,
-      status: data?.status ?? null,
-    },
-  })
-}
+  const paymentError = getPaymentErrorResponse(data)
 
+  return res
+    .status(paymentError.status)
+    .json(paymentError.body)
+}
 const redirectUrl =
   data?.redirect_url ||
   data?.order_instructions?.redirect_url ||
@@ -2978,20 +3000,11 @@ if (!redirectUrl) {
 
   return res.status(502).json({
     ok: false,
-    error: "Pesapal returned an unexpected order response",
-    provider_echo: {
-      http_status: pesaResponse.status,
-      keys: Object.keys(data || {}),
-      has_order_tracking_id: !!data?.order_tracking_id,
-      error:
-        typeof data?.error === "string"
-          ? data.error
-          : data?.error?.message || null,
-      status: data?.status ?? null,
-    },
+    code: "PAYMENT_START_FAILED",
+    error:
+      "We couldn't start your payment. Please try again.",
   })
 }
-
     // Persist order record ENSURING we use merchantRef as id
     await db.collection('orders').doc(merchantRef).set({
       type: 'subscription', planId, amount, currency: CURRENCY, status: 'pending', reconciled: false, createdAt: admin.firestore.FieldValue.serverTimestamp(), uid, provider: 'pesapal', orderTrackingId: data?.order_tracking_id || null, base
